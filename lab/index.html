@@ -143,12 +143,34 @@ async function loadAbout(slug) {
   }
 }
 
-sel.onchange = () => {
-  code.value = EXAMPLES[sel.value];
+// deep-linking: the URL hash selects an experiment, e.g. #defer or #04-defer
+const slugOf = (k) => k.replace(/^\d+-/, '');
+function keyFromHash() {
+  const h = decodeURIComponent(location.hash.slice(1));
+  if (!h) return null;
+  if (EXAMPLES[h]) return h;                                    // exact key
+  return Object.keys(EXAMPLES).find((k) => slugOf(k) === h) || null;  // short slug
+}
+
+function selectExperiment(key, updateHash = true) {
+  if (!EXAMPLES[key]) return;
+  sel.value = key;
+  code.value = EXAMPLES[key];
   out.textContent = '';
-  loadAbout(sel.value);
-};
-sel.onchange();
+  loadAbout(key);
+  if (updateHash && decodeURIComponent(location.hash.slice(1)) !== slugOf(key)) {
+    location.hash = slugOf(key);
+  }
+}
+
+sel.onchange = () => selectExperiment(sel.value);
+window.addEventListener('hashchange', () => {
+  const key = keyFromHash();
+  if (key && key !== sel.value) selectExperiment(key, false);
+});
+
+// initial selection: URL hash if valid, otherwise the first experiment
+selectExperiment(keyFromHash() || sel.value, false);
 
 function line(text, cls) {
   const s = document.createElement('span'); if (cls) s.className = cls;
