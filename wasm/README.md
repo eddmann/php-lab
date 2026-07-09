@@ -2,8 +2,8 @@
 
 Each feature's patched PHP compiled to WebAssembly with Emscripten — one build per
 feature, mirroring the repo's one-patch-per-feature model. The lab
-(the repo-root [`index.html`](../index.html)) loads a feature's build in the
-browser and runs code against it, spawning a fresh instance per run.
+([`../lab/`](../lab/)) loads a feature's build in the browser and runs
+code against it, spawning a fresh instance per run.
 
 ```
 wasm/build.sh <feature>      # vanilla php-src -> apply feature.patch -> emconfigure/emmake
@@ -41,5 +41,5 @@ Serve the repo root (ES modules + wasm need HTTP, not file://):
 
 ```bash
 python3 -m http.server 8090
-open http://localhost:8090/
+open http://localhost:8090/lab/
 ```

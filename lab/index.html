@@ -135,7 +135,7 @@ function renderMarkdown(md) {
 async function loadAbout(slug) {
   about.innerHTML = '<p style="color:var(--dim)">loading…</p>';
   try {
-    const res = await fetch(`./features/${slug}/README.md`);
+    const res = await fetch(`../features/${slug}/README.md`);
     if (!res.ok) throw new Error(res.status);
     about.innerHTML = renderMarkdown(await res.text());
   } catch {
@@ -160,7 +160,7 @@ async function run() {
   const experiment = sel.value;
   line(`[loading ${experiment} wasm…]`, 'sys');
   try {
-    const mod = await import(`./wasm/dist/${experiment}/php.mjs?v=${Date.now()}`);
+    const mod = await import(`../wasm/dist/${experiment}/php.mjs?v=${Date.now()}`);
     const php = await mod.default({
       print: (s) => line(s),
       printErr: (s) => { if (s.trim() && !/munmap|dlopen/.test(s)) line(s, 'err'); },

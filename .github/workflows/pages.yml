@@ -26,8 +26,11 @@ jobs:
       - name: Assemble site (lab UI + wasm builds + experiment READMEs)
         run: |
           mkdir -p _site/wasm
-          cp index.html _site/
-          cp examples.mjs _site/
+          # Publish the lab UI (lives in lab/) at the site root. Its asset paths
+          # are ../wasm//../features for local dev at /lab/; rewrite them to ./
+          # since wasm/ and features/ are siblings of index.html at the root.
+          sed 's#\.\./wasm/#./wasm/#g; s#\.\./features/#./features/#g' lab/index.html > _site/index.html
+          cp lab/examples.mjs _site/examples.mjs
           cp -r wasm/dist _site/wasm/dist
           for d in features/*/; do
             mkdir -p "_site/$d"
