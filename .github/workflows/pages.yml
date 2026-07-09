@@ -27,7 +27,7 @@ jobs:
         run: |
           mkdir -p _site/wasm
           cp index.html _site/
-          cp -r lab _site/lab
+          cp examples.mjs _site/
           cp -r wasm/dist _site/wasm/dist
           for d in features/*/; do
             mkdir -p "_site/$d"

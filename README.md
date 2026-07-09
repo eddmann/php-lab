@@ -57,7 +57,7 @@ playable in the browser lab — pick a feature, edit the example, hit Run:
 ```bash
 wasm/build.sh 04-defer         # build a feature to wasm (see wasm/README.md)
 python3 -m http.server 8090    # serve the repo root
-open http://localhost:8090/lab/
+open http://localhost:8090/
 ```
 
 ## License
