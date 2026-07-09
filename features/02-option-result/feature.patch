@@ -1,0 +1,2210 @@
+diff --git a/Zend/tests/autoload/bug42798.phpt b/Zend/tests/autoload/bug42798.phpt
+index 5f19fe30..18efcaa1 100644
+--- a/Zend/tests/autoload/bug42798.phpt
++++ b/Zend/tests/autoload/bug42798.phpt
+@@ -7,10 +7,10 @@ spl_autoload_register(function ($className) {
+     exit();
+ });
+ 
+-function foo($c = ok::constant) {
++function foo($c = undefinedclass::constant) {
+ }
+ 
+ foo();
+ ?>
+ --EXPECT--
+-ok
++undefinedclass
+diff --git a/Zend/tests/coalesce_option.phpt b/Zend/tests/coalesce_option.phpt
+new file mode 100644
+index 00000000..940cf851
+--- /dev/null
++++ b/Zend/tests/coalesce_option.phpt
+@@ -0,0 +1,31 @@
++--TEST--
++`??` unwraps Some/Ok and falls back on None/Err (Propagatable-aware coalesce)
++--FILE--
++<?php
++var_dump(Some(5) ?? 0);      // unwraps
++var_dump(None() ?? 0);       // falls back
++var_dump(Ok(7) ?? -1);       // unwraps
++var_dump(Err("x") ?? -1);    // falls back
++
++// Plain values and null are unchanged.
++var_dump(42 ?? 0);
++var_dump(null ?? "d");
++
++// The default is lazy: not evaluated when the left side is present.
++function boom() { throw new \Exception("should not run"); }
++var_dump(Some("ok") ?? boom());
++
++// Chaining works left-to-right; first present-and-success wins.
++var_dump(None() ?? None() ?? "last");
++var_dump(None() ?? Some("mid") ?? "last");
++?>
++--EXPECT--
++int(5)
++int(0)
++int(7)
++int(-1)
++int(42)
++string(1) "d"
++string(2) "ok"
++string(4) "last"
++string(3) "mid"
+diff --git a/Zend/tests/inheritance/bug60444.phpt b/Zend/tests/inheritance/bug60444.phpt
+index f450b9e4..1348c8a9 100644
+--- a/Zend/tests/inheritance/bug60444.phpt
++++ b/Zend/tests/inheritance/bug60444.phpt
+@@ -5,10 +5,10 @@ Bug #60444 (Segmentation fault with include & class extending)
+ class Foo {
+     public function __construct() {
+         eval("class Bar extends Foo {}");
+-        Some::foo($this);
++        SomeClass::foo($this);
+     }
+ }
+-class Some {
++class SomeClass {
+     public static function foo(Foo $foo) {
+     }
+ }
+diff --git a/Zend/tests/instanceof_bind.phpt b/Zend/tests/instanceof_bind.phpt
+new file mode 100644
+index 00000000..422094c0
+--- /dev/null
++++ b/Zend/tests/instanceof_bind.phpt
+@@ -0,0 +1,49 @@
++--TEST--
++`instanceof Some($x)` binds the unwrapped payload (if-let style)
++--FILE--
++<?php
++// Bind on a true test; the expression still evaluates to the bool.
++if (Some(7) instanceof Some($x)) {
++    echo "some: $x\n";
++} else {
++    echo "none\n";
++}
++
++if (None() instanceof Some($x)) {
++    echo "some\n";
++} else {
++    echo "else\n";
++}
++
++// Ok binds getValue(), Err binds getError().
++$r = Err("boom");
++if ($r instanceof Ok($v)) {
++    echo "ok: $v\n";
++} elseif ($r instanceof Err($e)) {
++    echo "err: $e\n";
++}
++
++// while-let: drain a list of Options.
++$xs = [Some(1), Some(2), None()];
++while (array_shift($xs) instanceof Some($v)) {
++    echo "drain $v\n";
++}
++
++// The whole thing is a boolean expression.
++var_dump(Some(1) instanceof Some($a));
++var_dump(None() instanceof Some($b));
++
++// Plain instanceof (no capture) is unchanged.
++var_dump(Some(1) instanceof Some);
++var_dump(Some(1) instanceof None);
++?>
++--EXPECT--
++some: 7
++else
++err: boom
++drain 1
++drain 2
++bool(true)
++bool(false)
++bool(true)
++bool(false)
+diff --git a/Zend/tests/match_patterns.phpt b/Zend/tests/match_patterns.phpt
+new file mode 100644
+index 00000000..9acb88c3
+--- /dev/null
++++ b/Zend/tests/match_patterns.phpt
+@@ -0,0 +1,38 @@
++--TEST--
++match destructuring patterns for built-in Option/Result
++--FILE--
++<?php
++// Binding: Some($x) / Ok($v) / Err($e) bind the unwrapped payload.
++echo match (Some(5)) { Some($x) => $x * 2, None => -1 }, "\n";       // 10
++echo match (None())   { Some($x) => $x,     None => "none" }, "\n";   // none
++echo match (Ok(7))    { Ok($v) => $v,      Err($e) => "e:$e" }, "\n"; // 7
++echo match (Err("bad")) { Ok($v) => $v,    Err($e) => "e:$e" }, "\n"; // e:bad
++
++// default arm.
++echo match (Some(1)) { None => "n", default => "d" }, "\n";          // d
++
++// No arm matches and no default => UnhandledMatchError.
++try {
++    match (Some(1)) { None => "n" };
++} catch (\UnhandledMatchError $e) {
++    echo "unhandled\n";
++}
++
++// Plain match (no patterns) is unaffected.
++echo match (2) { 1 => "a", 2 => "b", default => "c" }, "\n";          // b
++
++// Nested: a pattern body may itself be a match.
++echo match (Ok(3)) {
++    Ok($v)  => match ($v) { 3 => "three", default => "?" },
++    Err($e) => "err",
++}, "\n";                                                              // three
++?>
++--EXPECT--
++10
++none
++7
++e:bad
++d
++unhandled
++b
++three
+diff --git a/Zend/tests/option_result_combinators.phpt b/Zend/tests/option_result_combinators.phpt
+new file mode 100644
+index 00000000..af0ee737
+--- /dev/null
++++ b/Zend/tests/option_result_combinators.phpt
+@@ -0,0 +1,64 @@
++--TEST--
++Option/Result combinators: flatMap, filter, orElse, unwrap, expect, mapErr, conversions
++--FILE--
++<?php
++// Option
++echo Some(3)->flatMap(fn($x) => Some($x + 5))->unwrap(), "\n";          // 8
++echo None()->flatMap(fn($x) => Some($x))->unwrapOr("n"), "\n";          // n
++echo Some(4)->filter(fn($x) => $x % 2 === 0)->unwrapOr("no"), "\n";     // 4
++echo Some(3)->filter(fn($x) => $x % 2 === 0)->unwrapOr("no"), "\n";     // no
++echo None()->orElse(fn() => Some(9))->unwrap(), "\n";                   // 9
++echo Some(7)->toNullable(), "\n";                                       // 7
++var_dump(None()->toNullable());                                         // NULL
++
++// Option -> Result
++echo match (Some(1)->okOr("e")) { Ok($v) => "ok:$v", Err($x) => "err:$x" }, "\n";  // ok:1
++echo match (None()->okOr("e"))  { Ok($v) => "ok:$v", Err($x) => "err:$x" }, "\n";  // err:e
++
++// Result
++echo Ok(10)->flatMap(fn($x) => Ok($x * 2))->unwrap(), "\n";             // 20
++echo Err("bad")->flatMap(fn($x) => Ok($x))->unwrapOr("kept"), "\n";     // kept
++echo Err("bad")->mapErr(fn($e) => strtoupper($e))->getError(), "\n";   // BAD
++echo Err("x")->orElse(fn($e) => Ok("recovered"))->unwrap(), "\n";      // recovered
++echo Ok(5)->toOption()->unwrap(), "\n";                                 // 5
++var_dump(Err("x")->toNullable());                                       // NULL
++
++// expect() throws with the given message on the empty side.
++try {
++    None()->expect("no value");
++} catch (\Error $e) {
++    echo $e->getMessage(), "\n";                                        // no value
++}
++
++// flatMap enforces that the callback returns the right wrapper.
++try {
++    Some(1)->flatMap(fn($x) => $x);
++} catch (\Error $e) {
++    echo "type-guarded\n";
++}
++
++// A fluent pipeline.
++echo Some(2)
++    ->map(fn($x) => $x * 3)
++    ->filter(fn($x) => $x > 5)
++    ->unwrapOr("none"), "\n";                                           // 6
++?>
++--EXPECT--
++8
++n
++4
++no
++9
++7
++NULL
++ok:1
++err:e
++20
++kept
++BAD
++recovered
++5
++NULL
++no value
++type-guarded
++6
+diff --git a/Zend/tests/option_result_factories.phpt b/Zend/tests/option_result_factories.phpt
+new file mode 100644
+index 00000000..5a1ea1ec
+--- /dev/null
++++ b/Zend/tests/option_result_factories.phpt
+@@ -0,0 +1,47 @@
++--TEST--
++Option/Result: try, fromNullable, all (sequence), and __toString
++--FILE--
++<?php
++// Result::try captures the return value or any thrown Throwable.
++var_dump(Result::try(fn() => 21 * 2)->unwrap());                       // int(42)
++echo Result::try(fn() => throw new RuntimeException("boom"))
++        ->getError()->getMessage(), "\n";                              // boom
++
++// Option::fromNullable bridges PHP's null world.
++var_dump(Option::fromNullable(null) instanceof None);                  // true
++echo Option::fromNullable(7)->unwrap(), "\n";                          // 7
++
++// Sequence: all present -> wrapper of the list (keys preserved); else short-circuit.
++print_r(Option::all([Some(1), Some(2), Some(3)])->unwrap());           // [1,2,3]
++var_dump(Option::all([Some(1), None(), Some(3)]) instanceof None);     // true
++print_r(Result::all(['a' => Ok(1), 'b' => Ok(2)])->unwrap());          // [a=>1,b=>2]
++echo Result::all([Ok(1), Err("e2"), Err("e3")])->getError(), "\n";    // e2
++
++// __toString / Stringable.
++echo (string) Some(42), "\n";                                         // Some(42)
++echo (string) None(), "\n";                                           // None
++echo (string) Ok("hi"), "\n";                                         // Ok("hi")
++echo "result is " . Err("bad"), "\n";                                 // result is Err("bad")
++?>
++--EXPECT--
++int(42)
++boom
++bool(true)
++7
++Array
++(
++    [0] => 1
++    [1] => 2
++    [2] => 3
++)
++bool(true)
++Array
++(
++    [a] => 1
++    [b] => 2
++)
++e2
++Some(42)
++None
++Ok("hi")
++result is Err("bad")
+diff --git a/Zend/tests/option_result_integration.phpt b/Zend/tests/option_result_integration.phpt
+new file mode 100644
+index 00000000..69925f5c
+--- /dev/null
++++ b/Zend/tests/option_result_integration.phpt
+@@ -0,0 +1,52 @@
++--TEST--
++Option/Result — end-to-end: ?, ??, match, instanceof, combinators, factories
++--FILE--
++<?php
++function parseAge(string $s): Result {
++    return is_numeric($s) ? Ok((int)$s) : Err("not a number: $s");
++}
++function classify(string $s): Result {
++    $age = parseAge($s)?;                 // ? short-circuits on Err
++    return Ok($age >= 18 ? "adult" : "minor");
++}
++echo classify("20")->getValue(), "\n";
++echo classify("x")->getError(), "\n";
++echo (classify("15") ?? "??"), "\n";      // ?? unwraps Ok
++echo (classify("x") ?? "fallback"), "\n"; // ?? falls back on Err
++foreach (["9", "x", "40"] as $s)
++    echo match (classify($s)) { Ok($v) => "ok:$v", Err($e) => "err:$e" }, "\n";
++if (classify("30") instanceof Ok($v)) echo "bound $v\n";
++echo Some(10)->map(fn($x)=>$x+1)->filter(fn($x)=>$x>5)->unwrapOr(0), "\n";
++echo Some(3)->filter(fn($x)=>$x>5)->unwrapOr(-1), "\n";
++echo Ok(5)->flatMap(fn($x)=>Ok($x*2))->mapErr(fn($e)=>"E:$e")->getValue(), "\n";
++echo Result::try(fn()=>intdiv(10,2))->getValue(), "\n";
++echo Result::try(fn()=>intdiv(10,0))->isErr() ? "caught" : "no", "\n";
++echo Option::fromNullable(null)->isNone() ? "none" : "some", "\n";
++var_dump(Option::all([Some(1), Some(2), Some(3)])->getValue());
++echo Option::all([Some(1), None(), Some(3)])->isNone() ? "short" : "no", "\n";
++echo Some(42), " ", None(), " ", Ok("hi"), " ", Err("bad"), "\n";
++--EXPECT--
++adult
++not a number: x
++minor
++fallback
++ok:minor
++err:not a number: x
++ok:adult
++bound adult
++11
++-1
++10
++5
++caught
++none
++array(3) {
++  [0]=>
++  int(1)
++  [1]=>
++  int(2)
++  [2]=>
++  int(3)
++}
++short
++Some(42) None Ok("hi") Err("bad")
+diff --git a/Zend/tests/propagate.phpt b/Zend/tests/propagate.phpt
+new file mode 100644
+index 00000000..fdeb6625
+--- /dev/null
++++ b/Zend/tests/propagate.phpt
+@@ -0,0 +1,66 @@
++--TEST--
++Postfix `?` propagation operator with built-in Option/Result
++--FILE--
++<?php
++// None short-circuits the enclosing function.
++function firstNone(): Option {
++    $x = None()?;          // returns None here
++    echo "unreachable\n";
++    return Some($x);
++}
++var_dump(firstNone() instanceof None);
++
++// Some unwraps to the inner value.
++function addOne(): Option {
++    $x = Some(41)?;
++    return Some($x + 1);
++}
++var_dump(addOne()->value);
++
++// Result: Ok unwraps, Err propagates.
++function okPath(): Result {
++    $x = Ok(10)?;
++    return Ok($x * 2);
++}
++function errPath(): Result {
++    $x = Err("boom")?;
++    return Ok($x);
++}
++var_dump(okPath()->value);
++$e = errPath();
++var_dump($e instanceof Err, $e->getError());
++
++// Chaining: first failure wins.
++function chain(): Option {
++    $a = Some(2)?;
++    $b = None()?;
++    return Some($a + $b);
++}
++var_dump(chain() instanceof None);
++
++// finally runs on short-circuit.
++function withFinally(): Option {
++    try {
++        $x = None()?;
++        return Some($x);
++    } finally {
++        echo "finally\n";
++    }
++}
++var_dump(withFinally() instanceof None);
++
++// Ternary / coalesce still parse and run normally.
++$t = true ? "y" : "n";
++$c = null ?? "d";
++echo $t, $c, "\n";
++?>
++--EXPECT--
++bool(true)
++int(42)
++int(20)
++bool(true)
++string(4) "boom"
++bool(true)
++finally
++bool(true)
++yd
+diff --git a/Zend/tests/propagate_return_type.phpt b/Zend/tests/propagate_return_type.phpt
+new file mode 100644
+index 00000000..20404046
+--- /dev/null
++++ b/Zend/tests/propagate_return_type.phpt
+@@ -0,0 +1,25 @@
++--TEST--
++Propagated `?` value is checked against the enclosing return type
++--FILE--
++<?php
++// Short-circuit returns a None, which is incompatible with `: int`.
++function bad(): int {
++    $x = None()?;
++    return $x;
++}
++try {
++    bad();
++} catch (\TypeError $e) {
++    echo "TypeError\n";
++}
++
++// Compatible return type works.
++function good(): Option {
++    $x = None()?;
++    return Some($x);
++}
++var_dump(good() instanceof None);
++?>
++--EXPECT--
++TypeError
++bool(true)
+diff --git a/Zend/zend_ast.c b/Zend/zend_ast.c
+index 9cb3c7aa..91e66a14 100644
+--- a/Zend/zend_ast.c
++++ b/Zend/zend_ast.c
+@@ -2375,6 +2375,8 @@ simple_list:
+ 			POSTFIX_OP("++", 240, 241);
+ 		case ZEND_AST_POST_DEC:
+ 			POSTFIX_OP("--", 240, 241);
++		case ZEND_AST_PROPAGATE:
++			POSTFIX_OP("?", 240, 241);
+ 
+ 		case ZEND_AST_GLOBAL:
+ 			APPEND_NODE_1("global");
+@@ -2556,6 +2558,14 @@ simple_list:
+ 			smart_str_appends(str, " instanceof ");
+ 			zend_ast_export_ns_name(str, ast->child[1], 0, indent);
+ 			break;
++		case ZEND_AST_INSTANCEOF_BIND:
++			zend_ast_export_ex(str, ast->child[0], 0, indent);
++			smart_str_appends(str, " instanceof ");
++			zend_ast_export_ns_name(str, ast->child[1], 0, indent);
++			smart_str_appendc(str, '(');
++			zend_ast_export_ex(str, ast->child[2], 0, indent);
++			smart_str_appendc(str, ')');
++			break;
+ 		case ZEND_AST_YIELD:
+ 			if (priority > 70) smart_str_appendc(str, '(');
+ 			smart_str_appends(str, "yield ");
+diff --git a/Zend/zend_ast.h b/Zend/zend_ast.h
+index fb48b187..da93191d 100644
+--- a/Zend/zend_ast.h
++++ b/Zend/zend_ast.h
+@@ -98,6 +98,7 @@ enum _zend_ast_kind {
+ 	ZEND_AST_POST_DEC,
+ 	ZEND_AST_YIELD_FROM,
+ 	ZEND_AST_CLASS_NAME,
++	ZEND_AST_PROPAGATE,
+ 
+ 	ZEND_AST_GLOBAL,
+ 	ZEND_AST_UNSET,
+@@ -160,6 +161,7 @@ enum _zend_ast_kind {
+ 	ZEND_AST_NULLSAFE_METHOD_CALL,
+ 	ZEND_AST_STATIC_CALL,
+ 	ZEND_AST_CONDITIONAL,
++	ZEND_AST_INSTANCEOF_BIND,
+ 
+ 	ZEND_AST_TRY,
+ 	ZEND_AST_CATCH,
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..69248c93 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -100,6 +100,7 @@ static zend_op *zend_compile_var(znode *result, zend_ast *ast, uint32_t type, bo
+ static zend_op *zend_delayed_compile_var(znode *result, zend_ast *ast, uint32_t type, bool by_ref);
+ static void zend_compile_expr(znode *result, zend_ast *ast);
+ static void zend_compile_stmt(zend_ast *ast);
++static void zend_emit_propagate_method(znode *result, znode *obj_node, const char *name);
+ static void zend_compile_assign(znode *result, zend_ast *ast);
+ 
+ #ifdef ZEND_CHECK_STACK_LIMIT
+@@ -6543,6 +6544,196 @@ static void zend_compile_pipe(znode *result, zend_ast *ast)
+ 	zend_compile_expr(result, fcall_ast);
+ }
+ 
++/* Recognise a destructuring match-arm condition for the built-in Option/Result
++ * types: `Some($x)` / `Ok($v)` / `Err($e)` (binding) or bare `Some`/`Ok`/`Err`/
++ * `None` (no binding). These parse as an ordinary call / constant; we reinterpret
++ * them in match-arm position (comparing a subject against a freshly-built
++ * Some(...) via === is never meaningful, so nothing useful is shadowed). */
++static bool zend_match_pattern_info(
++		zend_ast *cond, const char **type_name, zend_ast **bind_var, bool *use_error)
++{
++	*bind_var = NULL;
++	*use_error = 0;
++	if (cond->kind == ZEND_AST_CALL) {
++		zend_ast *name_ast = cond->child[0];
++		zend_ast *args_ast = cond->child[1];
++		if (name_ast->kind != ZEND_AST_ZVAL
++		 || Z_TYPE_P(zend_ast_get_zval(name_ast)) != IS_STRING
++		 || args_ast->kind != ZEND_AST_ARG_LIST) {
++			return 0;
++		}
++		zend_string *n = Z_STR_P(zend_ast_get_zval(name_ast));
++		if (zend_string_equals_literal_ci(n, "Some")) { *type_name = "Some"; }
++		else if (zend_string_equals_literal_ci(n, "Ok")) { *type_name = "Ok"; }
++		else if (zend_string_equals_literal_ci(n, "Err")) { *type_name = "Err"; *use_error = 1; }
++		else return 0;
++		zend_ast_list *args = zend_ast_get_list(args_ast);
++		if (args->children != 1 || args->child[0]->kind != ZEND_AST_VAR) {
++			return 0;
++		}
++		*bind_var = args->child[0];
++		return 1;
++	} else if (cond->kind == ZEND_AST_CONST) {
++		zend_ast *name_ast = cond->child[0];
++		if (name_ast->kind != ZEND_AST_ZVAL || Z_TYPE_P(zend_ast_get_zval(name_ast)) != IS_STRING) {
++			return 0;
++		}
++		zend_string *n = Z_STR_P(zend_ast_get_zval(name_ast));
++		if (zend_string_equals_literal_ci(n, "Some")) { *type_name = "Some"; }
++		else if (zend_string_equals_literal_ci(n, "None")) { *type_name = "None"; }
++		else if (zend_string_equals_literal_ci(n, "Ok")) { *type_name = "Ok"; }
++		else if (zend_string_equals_literal_ci(n, "Err")) { *type_name = "Err"; }
++		else return 0;
++		return 1;
++	}
++	return 0;
++}
++
++static bool zend_match_has_patterns(zend_ast_list *arms)
++{
++	for (uint32_t i = 0; i < arms->children; i++) {
++		zend_ast *arm = arms->child[i];
++		if (!arm->child[0]) {
++			continue;
++		}
++		zend_ast_list *conds = zend_ast_get_list(arm->child[0]);
++		for (uint32_t j = 0; j < conds->children; j++) {
++			const char *t; zend_ast *b; bool e;
++			if (zend_match_pattern_info(conds->child[j], &t, &b, &e)) {
++				return 1;
++			}
++		}
++	}
++	return 0;
++}
++
++/* Emit `result = obj instanceof <type_name>` (obj consumed). */
++static void zend_emit_pattern_instanceof(znode *result, znode *obj, const char *type_name)
++{
++	zend_op *opline = zend_emit_op_tmp(result, ZEND_INSTANCEOF, obj, NULL);
++	opline->op2_type = IS_CONST;
++	opline->op2.constant = zend_add_class_name_literal(
++		zend_string_init(type_name, strlen(type_name), 0));
++	opline->extended_value = zend_alloc_cache_slot();
++}
++
++/* Sequential compilation of a `match` whose arms include Option/Result patterns.
++ * Each arm tests `subject instanceof <Type>` (or === for plain conditions) and,
++ * for a single binding pattern, binds the unwrapped payload before the body. */
++static void zend_compile_match_patterns(znode *result, zend_ast *ast)
++{
++	zend_ast *expr_ast = ast->child[0];
++	zend_ast_list *arms = zend_ast_get_list(ast->child[1]);
++	bool has_default_arm = 0;
++
++	for (uint32_t i = 0; i < arms->children; i++) {
++		if (!arms->child[i]->child[0]) {
++			if (has_default_arm) {
++				CG(zend_lineno) = arms->child[i]->lineno;
++				zend_error_noreturn(E_COMPILE_ERROR,
++					"Match expressions may only contain one default arm");
++			}
++			has_default_arm = 1;
++		}
++	}
++
++	/* Evaluate the subject once into a TMP we own. */
++	znode subj_tmp, subj;
++	zend_compile_expr(&subj_tmp, expr_ast);
++	zend_emit_op_tmp(&subj, ZEND_QM_ASSIGN, &subj_tmp, NULL);
++
++	uint32_t total_conds = 0;
++	for (uint32_t i = 0; i < arms->children; i++) {
++		if (arms->child[i]->child[0]) {
++			total_conds += zend_ast_get_list(arms->child[i]->child[0])->children;
++		}
++	}
++	uint32_t *cond_jmp = safe_emalloc(sizeof(uint32_t), total_conds ? total_conds : 1, 0);
++	uint32_t *end_jmp = safe_emalloc(sizeof(uint32_t), arms->children, 0);
++
++	/* Test phase: each condition jumps to its arm body on a match. */
++	uint32_t cc = 0;
++	for (uint32_t i = 0; i < arms->children; i++) {
++		zend_ast *arm = arms->child[i];
++		if (!arm->child[0]) {
++			continue;
++		}
++		zend_ast_list *conds = zend_ast_get_list(arm->child[0]);
++		for (uint32_t j = 0; j < conds->children; j++) {
++			zend_ast *cond = conds->child[j];
++			const char *tname; zend_ast *bvar; bool uerr;
++			znode test;
++			if (zend_match_pattern_info(cond, &tname, &bvar, &uerr)) {
++				znode copy;
++				zend_emit_op_tmp(&copy, ZEND_COPY_TMP, &subj, NULL);
++				zend_emit_pattern_instanceof(&test, &copy, tname);
++			} else {
++				znode cond_node, case_node;
++				zend_compile_expr(&cond_node, cond);
++				case_node.op_type = IS_TMP_VAR;
++				case_node.u.op.var = get_temporary_variable();
++				zend_op *op = zend_emit_op(NULL, ZEND_CASE_STRICT, &subj, &cond_node);
++				SET_NODE(op->result, &case_node);
++				test = case_node;
++			}
++			cond_jmp[cc++] = zend_emit_cond_jump(ZEND_JMPNZ, &test, 0);
++		}
++	}
++
++	/* No arm matched: fall to the default body, or raise UnhandledMatchError. */
++	uint32_t default_jmp = zend_emit_jump(0);
++
++	/* Body phase. */
++	bool is_first = 1;
++	cc = 0;
++	for (uint32_t i = 0; i < arms->children; i++) {
++		zend_ast *arm = arms->child[i];
++		if (arm->child[0]) {
++			zend_ast_list *conds = zend_ast_get_list(arm->child[0]);
++			for (uint32_t j = 0; j < conds->children; j++) {
++				zend_update_jump_target_to_next(cond_jmp[cc++]);
++			}
++			/* Bind the payload for a single binding pattern. */
++			if (conds->children == 1) {
++				const char *tname; zend_ast *bvar; bool uerr;
++				if (zend_match_pattern_info(conds->child[0], &tname, &bvar, &uerr) && bvar) {
++					znode copy, val, var_node;
++					zend_emit_op_tmp(&copy, ZEND_COPY_TMP, &subj, NULL);
++					zend_emit_propagate_method(&val, &copy, uerr ? "getError" : "getValue");
++					zend_compile_var(&var_node, bvar, BP_VAR_W, 0);
++					zend_emit_op(NULL, ZEND_ASSIGN, &var_node, &val);
++				}
++			}
++		} else {
++			zend_update_jump_target_to_next(default_jmp);
++		}
++
++		znode body_node;
++		zend_compile_expr(&body_node, arm->child[1]);
++		if (is_first) {
++			zend_emit_op_tmp(result, ZEND_QM_ASSIGN, &body_node, NULL);
++			is_first = 0;
++		} else {
++			zend_op *op = zend_emit_op(NULL, ZEND_QM_ASSIGN, &body_node, NULL);
++			SET_NODE(op->result, result);
++		}
++		end_jmp[i] = zend_emit_jump(0);
++	}
++
++	if (!has_default_arm) {
++		zend_update_jump_target_to_next(default_jmp);
++		zend_emit_op(NULL, ZEND_MATCH_ERROR, &subj, NULL);
++	}
++
++	for (uint32_t i = 0; i < arms->children; i++) {
++		zend_update_jump_target_to_next(end_jmp[i]);
++	}
++	zend_emit_op(NULL, ZEND_FREE, &subj, NULL);
++
++	efree(cond_jmp);
++	efree(end_jmp);
++}
++
+ static void zend_compile_match(znode *result, zend_ast *ast)
+ {
+ 	zend_ast *expr_ast = ast->child[0];
+@@ -6550,6 +6741,11 @@ static void zend_compile_match(znode *result, zend_ast *ast)
+ 	bool has_default_arm = 0;
+ 	uint32_t opnum_match = (uint32_t)-1;
+ 
++	if (zend_match_has_patterns(arms)) {
++		zend_compile_match_patterns(result, ast);
++		return;
++	}
++
+ 	znode expr_node;
+ 	zend_compile_expr(&expr_node, expr_ast);
+ 
+@@ -10559,27 +10755,121 @@ static void zend_compile_conditional(znode *result, zend_ast *ast) /* {{{ */
+ }
+ /* }}} */
+ 
++/* Emit `obj->name()` (no args), result in `result`. `obj_node` is consumed. */
++static void zend_emit_propagate_method(znode *result, znode *obj_node, const char *name) /* {{{ */
++{
++	znode method_node;
++	zend_ast *method_ast = zend_ast_create_zval_from_str(zend_string_init(name, strlen(name), 0));
++	zend_ast *args_ast = zend_ast_create_list(0, ZEND_AST_ARG_LIST);
++	zend_op *opline;
++
++	zend_compile_expr(&method_node, method_ast);
++
++	opline = zend_emit_op(NULL, ZEND_INIT_METHOD_CALL, obj_node, NULL);
++	opline->op2_type = IS_CONST;
++	opline->op2.constant = zend_add_func_name_literal(Z_STR(method_node.u.constant));
++	opline->result.num = zend_alloc_cache_slots(2);
++
++	zend_compile_call_common(result, args_ast, NULL, CG(zend_lineno));
++
++	zend_ast_destroy(method_ast);
++	zend_ast_destroy(args_ast);
++}
++/* }}} */
++
++/* Postfix `EXPR?` propagation: evaluate EXPR once; if it `isFailure()` return it
++ * from the enclosing function (running finally/loop cleanup and return-type
++ * checks), otherwise the expression unwraps to `EXPR->getValue()`. */
++static void zend_compile_propagate(znode *result, zend_ast *ast) /* {{{ */
++{
++	zend_ast *operand_ast = ast->child[0];
++	bool is_generator = (CG(active_op_array)->fn_flags & ZEND_ACC_GENERATOR) != 0;
++	znode operand, base, copy, cond;
++	uint32_t opnum_jmpz;
++
++	/* Evaluate the operand exactly once into a TMP we own. */
++	zend_compile_expr(&operand, operand_ast);
++	zend_emit_op_tmp(&base, ZEND_QM_ASSIGN, &operand, NULL);
++
++	/* cond = base->isFailure(); the COPY keeps `base` live for the second use. */
++	zend_emit_op_tmp(&copy, ZEND_COPY_TMP, &base, NULL);
++	zend_emit_propagate_method(&cond, &copy, "isFailure");
++
++	/* if (!failure) jump to the unwrap; otherwise fall through and return. */
++	opnum_jmpz = zend_emit_cond_jump(ZEND_JMPZ, &cond, 0);
++
++	/* Failure: return the container, mirroring zend_compile_return(). */
++	if (!is_generator && (CG(active_op_array)->fn_flags & ZEND_ACC_HAS_RETURN_TYPE)) {
++		zend_emit_return_type_check(&base, CG(active_op_array)->arg_info - 1, 0);
++	}
++	zend_handle_loops_and_finally(&base);
++	zend_emit_op(NULL, ZEND_RETURN, &base, NULL);
++
++	/* Success: result = base->getValue(). */
++	zend_update_jump_target_to_next(opnum_jmpz);
++	zend_emit_propagate_method(result, &base, "getValue");
++}
++/* }}} */
++
+ static void zend_compile_coalesce(znode *result, zend_ast *ast) /* {{{ */
+ {
+ 	zend_ast *expr_ast = ast->child[0];
+ 	zend_ast *default_ast = ast->child[1];
+ 
+-	znode expr_node, default_node;
++	znode expr_node, default_node, copy_node, cond_node, value_node;
+ 	zend_op *opline;
+-	uint32_t opnum;
++	uint32_t opnum_coalesce, opnum_default;
++	uint32_t opnum_jmpz_plain, opnum_jmpnz_fail, jmp_end_default, jmp_end_success;
+ 
+ 	zend_compile_var(&expr_node, expr_ast, BP_VAR_IS, 0);
+ 
+-	opnum = get_next_op_number();
++	opnum_coalesce = get_next_op_number();
+ 	zend_emit_op_tmp(result, ZEND_COALESCE, &expr_node, NULL);
+ 
++	/* Default branch: reached by fall-through when the operand is null/unset, and
++	 * by a back-jump below when the operand is a Propagatable failure (None/Err). */
++	opnum_default = get_next_op_number();
+ 	zend_compile_expr(&default_node, default_ast);
+-
+ 	opline = zend_emit_op_tmp(NULL, ZEND_QM_ASSIGN, &default_node, NULL);
+ 	SET_NODE(opline->result, result);
++	jmp_end_default = zend_emit_jump(0);
+ 
+-	opline = &CG(active_op_array)->opcodes[opnum];
++	/* Present branch: COALESCE jumps here when the operand is non-null; `result`
++	 * currently holds that value. */
++	opline = &CG(active_op_array)->opcodes[opnum_coalesce];
+ 	opline->op2.opline_num = get_next_op_number();
++
++	/* Plain (non-Propagatable) values are returned unchanged. */
++	zend_emit_op_tmp(&copy_node, ZEND_COPY_TMP, result, NULL);
++	opline = zend_emit_op_tmp(&cond_node, ZEND_INSTANCEOF, &copy_node, NULL);
++	opline->op2_type = IS_CONST;
++	opline->op2.constant = zend_add_class_name_literal(
++		zend_string_init("Propagatable", sizeof("Propagatable") - 1, 0));
++	opline->extended_value = zend_alloc_cache_slot();
++	opnum_jmpz_plain = zend_emit_cond_jump(ZEND_JMPZ, &cond_node, 0);
++
++	/* A failure (None/Err) falls back to the default. */
++	zend_emit_op_tmp(&copy_node, ZEND_COPY_TMP, result, NULL);
++	zend_emit_propagate_method(&cond_node, &copy_node, "isFailure");
++	opnum_jmpnz_fail = zend_emit_cond_jump(ZEND_JMPNZ, &cond_node, 0);
++
++	/* Success (Some/Ok): unwrap to getValue(). */
++	zend_emit_op_tmp(&copy_node, ZEND_COPY_TMP, result, NULL);
++	zend_emit_propagate_method(&value_node, &copy_node, "getValue");
++	zend_emit_op(NULL, ZEND_FREE, result, NULL);
++	opline = zend_emit_op_tmp(NULL, ZEND_QM_ASSIGN, &value_node, NULL);
++	SET_NODE(opline->result, result);
++	jmp_end_success = zend_emit_jump(0);
++
++	/* Failure: drop the container, then run the default branch. */
++	zend_update_jump_target_to_next(opnum_jmpnz_fail);
++	zend_emit_op(NULL, ZEND_FREE, result, NULL);
++	zend_emit_jump(opnum_default);
++
++	/* End: plain / default / success branches converge here. */
++	zend_update_jump_target_to_next(opnum_jmpz_plain);
++	zend_update_jump_target_to_next(jmp_end_default);
++	zend_update_jump_target_to_next(jmp_end_success);
+ }
+ /* }}} */
+ 
+@@ -10792,6 +11082,68 @@ static void zend_compile_instanceof(znode *result, zend_ast *ast) /* {{{ */
+ 		SET_NODE(opline->op2, &class_node);
+ 	}
+ }
++
++/* `EXPR instanceof Some($x)` — like `instanceof`, but when the test is true it
++ * also binds the unwrapped payload to $x (getValue() for Some/Ok, getError() for
++ * Err). Enables `if let`-style use: `if ($opt instanceof Some($x)) { use $x; }`. */
++static void zend_compile_instanceof_bind(znode *result, zend_ast *ast) /* {{{ */
++{
++	zend_ast *obj_ast = ast->child[0];
++	zend_ast *class_ast = ast->child[1];
++	zend_ast *var_ast = ast->child[2];
++
++	const char *method;
++	if (class_ast->kind == ZEND_AST_ZVAL && Z_TYPE_P(zend_ast_get_zval(class_ast)) == IS_STRING) {
++		const char *name = Z_STRVAL_P(zend_ast_get_zval(class_ast));
++		if (*name == '\\') {
++			name++;
++		}
++		if (!strcasecmp(name, "Some") || !strcasecmp(name, "Ok")) {
++			method = "getValue";
++		} else if (!strcasecmp(name, "Err")) {
++			method = "getError";
++		} else {
++			zend_error_noreturn(E_COMPILE_ERROR,
++				"Binding instanceof pattern requires Some, Ok or Err");
++		}
++	} else {
++		zend_error_noreturn(E_COMPILE_ERROR,
++			"Binding instanceof pattern requires a Some, Ok or Err class name");
++	}
++
++	znode obj_node, base, copy, class_node, cond_node, value_node, var_node;
++	zend_op *opline;
++
++	/* Evaluate the subject once into a TMP we own. */
++	zend_compile_expr(&obj_node, obj_ast);
++	zend_emit_op_tmp(&base, ZEND_QM_ASSIGN, &obj_node, NULL);
++
++	/* result = base instanceof Class */
++	zend_emit_op_tmp(&copy, ZEND_COPY_TMP, &base, NULL);
++	zend_compile_class_ref(&class_node, class_ast,
++		ZEND_FETCH_CLASS_NO_AUTOLOAD | ZEND_FETCH_CLASS_EXCEPTION | ZEND_FETCH_CLASS_SILENT);
++	opline = zend_emit_op_tmp(result, ZEND_INSTANCEOF, &copy, NULL);
++	if (class_node.op_type == IS_CONST) {
++		opline->op2_type = IS_CONST;
++		opline->op2.constant = zend_add_class_name_literal(Z_STR(class_node.u.constant));
++		opline->extended_value = zend_alloc_cache_slot();
++	} else {
++		SET_NODE(opline->op2, &class_node);
++	}
++
++	/* if (result) $var = base->method(); */
++	zend_emit_op_tmp(&cond_node, ZEND_COPY_TMP, result, NULL);
++	uint32_t opnum_jmpz = zend_emit_cond_jump(ZEND_JMPZ, &cond_node, 0);
++
++	zend_emit_op_tmp(&copy, ZEND_COPY_TMP, &base, NULL);
++	zend_emit_propagate_method(&value_node, &copy, method);
++	zend_compile_var(&var_node, var_ast, BP_VAR_W, 0);
++	zend_emit_op(NULL, ZEND_ASSIGN, &var_node, &value_node);
++
++	/* Both branches converge here and release the subject. */
++	zend_update_jump_target_to_next(opnum_jmpz);
++	zend_emit_op(NULL, ZEND_FREE, &base, NULL);
++}
+ /* }}} */
+ 
+ static void zend_compile_include_or_eval(znode *result, zend_ast *ast) /* {{{ */
+@@ -11876,6 +12228,9 @@ static void zend_compile_expr_inner(znode *result, zend_ast *ast) /* {{{ */
+ 		case ZEND_AST_COALESCE:
+ 			zend_compile_coalesce(result, ast);
+ 			return;
++		case ZEND_AST_PROPAGATE:
++			zend_compile_propagate(result, ast);
++			return;
+ 		case ZEND_AST_ASSIGN_COALESCE:
+ 			zend_compile_assign_coalesce(result, ast);
+ 			return;
+@@ -11891,6 +12246,9 @@ static void zend_compile_expr_inner(znode *result, zend_ast *ast) /* {{{ */
+ 		case ZEND_AST_INSTANCEOF:
+ 			zend_compile_instanceof(result, ast);
+ 			return;
++		case ZEND_AST_INSTANCEOF_BIND:
++			zend_compile_instanceof_bind(result, ast);
++			return;
+ 		case ZEND_AST_INCLUDE_OR_EVAL:
+ 			zend_compile_include_or_eval(result, ast);
+ 			return;
+diff --git a/Zend/zend_default_classes.c b/Zend/zend_default_classes.c
+index 7ab9b832..8e460325 100644
+--- a/Zend/zend_default_classes.c
++++ b/Zend/zend_default_classes.c
+@@ -28,6 +28,7 @@
+ #include "zend_weakrefs.h"
+ #include "zend_enum.h"
+ #include "zend_fibers.h"
++#include "zend_option_result.h"
+ 
+ ZEND_API void zend_register_default_classes(void)
+ {
+@@ -40,4 +41,5 @@ ZEND_API void zend_register_default_classes(void)
+ 	zend_register_attribute_ce();
+ 	zend_register_enum_ce();
+ 	zend_register_fiber_ce();
++	zend_register_option_result();
+ }
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..ce2e09f4 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -51,6 +51,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %destructor { zend_ast_destroy($$); } <ast>
+ %destructor { if ($$) zend_string_release_ex($$, 0); } <str>
+ 
++%precedence T_PROPAGATE
+ %precedence T_THROW
+ %precedence PREC_ARROW_FUNCTION
+ %precedence T_INCLUDE T_INCLUDE_ONCE T_REQUIRE T_REQUIRE_ONCE
+@@ -1345,6 +1346,9 @@ expr:
+ 			{ $$ = zend_ast_create_binary_op(ZEND_SPACESHIP, $1, $3); }
+ 	|	expr T_INSTANCEOF class_name_reference
+ 			{ $$ = zend_ast_create(ZEND_AST_INSTANCEOF, $1, $3); }
++	|	expr T_INSTANCEOF class_name_reference '(' T_VARIABLE ')'
++			{ $$ = zend_ast_create(ZEND_AST_INSTANCEOF_BIND, $1, $3,
++			      zend_ast_create(ZEND_AST_VAR, $5)); }
+ 	|	'(' expr ')' {
+ 			$$ = $2;
+ 			if ($$->kind == ZEND_AST_CONDITIONAL) $$->attr = ZEND_PARENTHESIZED_CONDITIONAL;
+@@ -1356,6 +1360,8 @@ expr:
+ 			{ $$ = zend_ast_create(ZEND_AST_CONDITIONAL, $1, $3, $5); }
+ 	|	expr '?' ':' expr
+ 			{ $$ = zend_ast_create(ZEND_AST_CONDITIONAL, $1, NULL, $4); }
++	|	expr '?' %prec T_PROPAGATE
++			{ $$ = zend_ast_create(ZEND_AST_PROPAGATE, $1); }
+ 	|	expr T_COALESCE expr
+ 			{ $$ = zend_ast_create(ZEND_AST_COALESCE, $1, $3); }
+ 	|	internal_functions_in_yacc { $$ = $1; }
+diff --git a/Zend/zend_option_result.c b/Zend/zend_option_result.c
+new file mode 100644
+index 00000000..4fc7ba5f
+--- /dev/null
++++ b/Zend/zend_option_result.c
+@@ -0,0 +1,741 @@
++/*
++   +----------------------------------------------------------------------+
++   | Built-in Option/Result types for the `?` propagation operator.       |
++   |                                                                      |
++   | Option = Some|None, Result = Ok|Err. Both implement Propagatable,    |
++   | the protocol the postfix `?` operator compiles against:              |
++   |   isFailure() -> short-circuit (return the container) when true      |
++   |   getValue()  -> unwrap the success payload                          |
++   +----------------------------------------------------------------------+
++*/
++
++#include "zend.h"
++#include "zend_API.h"
++#include "zend_interfaces.h"
++#include "zend_exceptions.h"
++#include "zend_smart_str.h"
++#include "zend_option_result.h"
++#include "zend_option_result_arginfo.h"
++
++ZEND_API zend_class_entry *zend_ce_propagatable;
++ZEND_API zend_class_entry *zend_ce_option;
++ZEND_API zend_class_entry *zend_ce_some;
++ZEND_API zend_class_entry *zend_ce_none;
++ZEND_API zend_class_entry *zend_ce_result;
++ZEND_API zend_class_entry *zend_ce_ok;
++ZEND_API zend_class_entry *zend_ce_err;
++
++#define PROP_VALUE "value"
++#define PROP_ERROR "error"
++
++static zend_always_inline bool instance_of(zval *zv, zend_class_entry *ce)
++{
++	return instanceof_function(Z_OBJCE_P(zv), ce);
++}
++
++static zend_always_inline zval *read_prop(zend_class_entry *ce, zval *obj, const char *name, size_t len, zval *rv)
++{
++	return zend_read_property(ce, Z_OBJ_P(obj), name, len, /* silent */ 0, rv);
++}
++
++/* Build `new $ce` and store $payload in $prop. */
++static void make_wrapped(zval *out, zend_class_entry *ce, const char *prop, size_t prop_len, zval *payload)
++{
++	object_init_ex(out, ce);
++	zend_update_property(ce, Z_OBJ_P(out), prop, prop_len, payload);
++}
++
++/* Call $fn($arg) into $ret. Returns SUCCESS/FAILURE. */
++static zend_result call_unary(zend_fcall_info *fci, zend_fcall_info_cache *fcc, zval *arg, zval *ret)
++{
++	zval params[1];
++	ZVAL_COPY(&params[0], arg);
++	fci->param_count = 1;
++	fci->params = params;
++	fci->named_params = NULL;
++	fci->retval = ret;
++	zend_result r = zend_call_function(fci, fcc);
++	zval_ptr_dtor(&params[0]);
++	return r;
++}
++
++/* Call $fn() into $ret. */
++static zend_result call_nullary(zend_fcall_info *fci, zend_fcall_info_cache *fcc, zval *ret)
++{
++	fci->param_count = 0;
++	fci->params = NULL;
++	fci->named_params = NULL;
++	fci->retval = ret;
++	return zend_call_function(fci, fcc);
++}
++
++/* Require $zv to be an instance of $ce, else throw and free it. Returns success. */
++static bool require_instance(zval *zv, zend_class_entry *ce, const char *what)
++{
++	if (Z_TYPE_P(zv) == IS_OBJECT && instanceof_function(Z_OBJCE_P(zv), ce)) {
++		return 1;
++	}
++	zval_ptr_dtor(zv);
++	zend_throw_error(NULL, "%s", what);
++	return 0;
++}
++
++/* Append a short, safe debug representation of $v to $str (for __toString). */
++static void append_value_repr(smart_str *str, zval *v)
++{
++	switch (Z_TYPE_P(v)) {
++		case IS_NULL:   smart_str_appends(str, "null"); break;
++		case IS_TRUE:   smart_str_appends(str, "true"); break;
++		case IS_FALSE:  smart_str_appends(str, "false"); break;
++		case IS_ARRAY:  smart_str_appends(str, "array"); break;
++		case IS_OBJECT: smart_str_append(str, Z_OBJCE_P(v)->name); break;
++		case IS_STRING: {
++			smart_str_appendc(str, '"');
++			smart_str_append(str, Z_STR_P(v));
++			smart_str_appendc(str, '"');
++			break;
++		}
++		default: {
++			zend_string *s = zval_get_string_func(v);
++			smart_str_append(str, s);
++			zend_string_release(s);
++			break;
++		}
++	}
++}
++
++/* ---------------- Option ---------------- */
++
++ZEND_METHOD(Option, some)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(value)
++	ZEND_PARSE_PARAMETERS_END();
++	make_wrapped(return_value, zend_ce_some, PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++}
++
++ZEND_METHOD(Option, none)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	object_init_ex(return_value, zend_ce_none);
++}
++
++ZEND_METHOD(Option, isSome)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(instance_of(ZEND_THIS, zend_ce_some));
++}
++
++ZEND_METHOD(Option, isNone)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(instance_of(ZEND_THIS, zend_ce_none));
++}
++
++ZEND_METHOD(Option, isFailure)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(instance_of(ZEND_THIS, zend_ce_none));
++}
++
++ZEND_METHOD(Option, getValue)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	if (instance_of(ZEND_THIS, zend_ce_some)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	zend_throw_error(NULL, "Cannot call getValue() on None");
++	RETURN_THROWS();
++}
++
++ZEND_METHOD(Option, unwrapOr)
++{
++	zval *def;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(def)
++	ZEND_PARSE_PARAMETERS_END();
++	if (instance_of(ZEND_THIS, zend_ce_some)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	RETURN_COPY(def);
++}
++
++ZEND_METHOD(Option, map)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!instance_of(ZEND_THIS, zend_ce_some)) {
++		RETURN_COPY(ZEND_THIS); /* None maps to None */
++	}
++
++	zval rv, ret;
++	zval *value = read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++	if (call_unary(&fci, &fcc, value, &ret) == SUCCESS) {
++		make_wrapped(return_value, zend_ce_some, PROP_VALUE, sizeof(PROP_VALUE) - 1, &ret);
++		zval_ptr_dtor(&ret);
++	}
++}
++
++ZEND_METHOD(Option, flatMap)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!instance_of(ZEND_THIS, zend_ce_some)) {
++		RETURN_COPY(ZEND_THIS);
++	}
++	zval rv, ret;
++	zval *value = read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++	if (call_unary(&fci, &fcc, value, &ret) == SUCCESS) {
++		if (!require_instance(&ret, zend_ce_option, "Option::flatMap() callback must return an Option")) {
++			RETURN_THROWS();
++		}
++		RETURN_COPY_VALUE(&ret);
++	}
++}
++
++ZEND_METHOD(Option, filter)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!instance_of(ZEND_THIS, zend_ce_some)) {
++		RETURN_COPY(ZEND_THIS);
++	}
++	zval rv, ret;
++	zval *value = read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++	if (call_unary(&fci, &fcc, value, &ret) == SUCCESS) {
++		bool keep = zend_is_true(&ret);
++		zval_ptr_dtor(&ret);
++		if (keep) {
++			RETURN_COPY(ZEND_THIS);
++		}
++		object_init_ex(return_value, zend_ce_none);
++	}
++}
++
++ZEND_METHOD(Option, orElse)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (instance_of(ZEND_THIS, zend_ce_some)) {
++		RETURN_COPY(ZEND_THIS);
++	}
++	zval ret;
++	if (call_nullary(&fci, &fcc, &ret) == SUCCESS) {
++		if (!require_instance(&ret, zend_ce_option, "Option::orElse() callback must return an Option")) {
++			RETURN_THROWS();
++		}
++		RETURN_COPY_VALUE(&ret);
++	}
++}
++
++ZEND_METHOD(Option, unwrap)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	if (instance_of(ZEND_THIS, zend_ce_some)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	zend_throw_error(NULL, "Called unwrap() on a None");
++	RETURN_THROWS();
++}
++
++ZEND_METHOD(Option, expect)
++{
++	zend_string *message;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_STR(message)
++	ZEND_PARSE_PARAMETERS_END();
++	if (instance_of(ZEND_THIS, zend_ce_some)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	zend_throw_error(NULL, "%s", ZSTR_VAL(message));
++	RETURN_THROWS();
++}
++
++ZEND_METHOD(Option, okOr)
++{
++	zval *error;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(error)
++	ZEND_PARSE_PARAMETERS_END();
++	if (instance_of(ZEND_THIS, zend_ce_some)) {
++		zval rv;
++		zval *value = read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++		make_wrapped(return_value, zend_ce_ok, PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++	} else {
++		make_wrapped(return_value, zend_ce_err, PROP_ERROR, sizeof(PROP_ERROR) - 1, error);
++	}
++}
++
++ZEND_METHOD(Option, toNullable)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	if (instance_of(ZEND_THIS, zend_ce_some)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	RETURN_NULL();
++}
++
++ZEND_METHOD(Option, fromNullable)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(value)
++	ZEND_PARSE_PARAMETERS_END();
++	if (Z_TYPE_P(value) == IS_NULL) {
++		object_init_ex(return_value, zend_ce_none);
++	} else {
++		make_wrapped(return_value, zend_ce_some, PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++	}
++}
++
++/* Sequence: all Some -> Some([values]); first None -> None. Keys are preserved. */
++ZEND_METHOD(Option, all)
++{
++	HashTable *arr;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ARRAY_HT(arr)
++	ZEND_PARSE_PARAMETERS_END();
++
++	zval out;
++	array_init(&out);
++	zend_string *key;
++	zend_ulong idx;
++	zval *entry;
++	ZEND_HASH_FOREACH_KEY_VAL(arr, idx, key, entry) {
++		ZVAL_DEREF(entry);
++		if (Z_TYPE_P(entry) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(entry), zend_ce_option)) {
++			zval_ptr_dtor(&out);
++			zend_throw_error(NULL, "Option::all() expects an array of Option");
++			RETURN_THROWS();
++		}
++		if (instanceof_function(Z_OBJCE_P(entry), zend_ce_none)) {
++			zval_ptr_dtor(&out);
++			object_init_ex(return_value, zend_ce_none);
++			return;
++		}
++		zval rv;
++		zval *v = read_prop(zend_ce_some, entry, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++		Z_TRY_ADDREF_P(v);
++		if (key) {
++			zend_hash_update(Z_ARRVAL(out), key, v);
++		} else {
++			zend_hash_index_update(Z_ARRVAL(out), idx, v);
++		}
++	} ZEND_HASH_FOREACH_END();
++
++	make_wrapped(return_value, zend_ce_some, PROP_VALUE, sizeof(PROP_VALUE) - 1, &out);
++	zval_ptr_dtor(&out);
++}
++
++ZEND_METHOD(Option, __toString)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	smart_str s = {0};
++	if (instance_of(ZEND_THIS, zend_ce_some)) {
++		zval rv;
++		zval *v = read_prop(zend_ce_some, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++		smart_str_appends(&s, "Some(");
++		append_value_repr(&s, v);
++		smart_str_appendc(&s, ')');
++	} else {
++		smart_str_appends(&s, "None");
++	}
++	smart_str_0(&s);
++	RETURN_STR(smart_str_extract(&s));
++}
++
++/* ---------------- Some / None ---------------- */
++
++ZEND_METHOD(Some, __construct)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(value)
++	ZEND_PARSE_PARAMETERS_END();
++	zend_update_property(zend_ce_some, Z_OBJ_P(ZEND_THIS), PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++}
++
++/* ---------------- Result ---------------- */
++
++ZEND_METHOD(Result, ok)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(value)
++	ZEND_PARSE_PARAMETERS_END();
++	make_wrapped(return_value, zend_ce_ok, PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++}
++
++ZEND_METHOD(Result, err)
++{
++	zval *error;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(error)
++	ZEND_PARSE_PARAMETERS_END();
++	make_wrapped(return_value, zend_ce_err, PROP_ERROR, sizeof(PROP_ERROR) - 1, error);
++}
++
++ZEND_METHOD(Result, isOk)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(instance_of(ZEND_THIS, zend_ce_ok));
++}
++
++ZEND_METHOD(Result, isErr)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(instance_of(ZEND_THIS, zend_ce_err));
++}
++
++ZEND_METHOD(Result, isFailure)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(instance_of(ZEND_THIS, zend_ce_err));
++}
++
++ZEND_METHOD(Result, getValue)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	if (instance_of(ZEND_THIS, zend_ce_ok)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	zend_throw_error(NULL, "Cannot call getValue() on Err");
++	RETURN_THROWS();
++}
++
++ZEND_METHOD(Result, getError)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	if (instance_of(ZEND_THIS, zend_ce_err)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_err, ZEND_THIS, PROP_ERROR, sizeof(PROP_ERROR) - 1, &rv));
++	}
++	zend_throw_error(NULL, "Cannot call getError() on Ok");
++	RETURN_THROWS();
++}
++
++ZEND_METHOD(Result, unwrapOr)
++{
++	zval *def;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(def)
++	ZEND_PARSE_PARAMETERS_END();
++	if (instance_of(ZEND_THIS, zend_ce_ok)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	RETURN_COPY(def);
++}
++
++ZEND_METHOD(Result, map)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!instance_of(ZEND_THIS, zend_ce_ok)) {
++		RETURN_COPY(ZEND_THIS); /* Err maps to itself */
++	}
++
++	zval rv, ret;
++	zval *value = read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++	if (call_unary(&fci, &fcc, value, &ret) == SUCCESS) {
++		make_wrapped(return_value, zend_ce_ok, PROP_VALUE, sizeof(PROP_VALUE) - 1, &ret);
++		zval_ptr_dtor(&ret);
++	}
++}
++
++ZEND_METHOD(Result, flatMap)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!instance_of(ZEND_THIS, zend_ce_ok)) {
++		RETURN_COPY(ZEND_THIS); /* Err short-circuits */
++	}
++	zval rv, ret;
++	zval *value = read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++	if (call_unary(&fci, &fcc, value, &ret) == SUCCESS) {
++		if (!require_instance(&ret, zend_ce_result, "Result::flatMap() callback must return a Result")) {
++			RETURN_THROWS();
++		}
++		RETURN_COPY_VALUE(&ret);
++	}
++}
++
++ZEND_METHOD(Result, mapErr)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!instance_of(ZEND_THIS, zend_ce_err)) {
++		RETURN_COPY(ZEND_THIS); /* Ok is unchanged */
++	}
++	zval rv, ret;
++	zval *error = read_prop(zend_ce_err, ZEND_THIS, PROP_ERROR, sizeof(PROP_ERROR) - 1, &rv);
++	if (call_unary(&fci, &fcc, error, &ret) == SUCCESS) {
++		make_wrapped(return_value, zend_ce_err, PROP_ERROR, sizeof(PROP_ERROR) - 1, &ret);
++		zval_ptr_dtor(&ret);
++	}
++}
++
++ZEND_METHOD(Result, orElse)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (instance_of(ZEND_THIS, zend_ce_ok)) {
++		RETURN_COPY(ZEND_THIS);
++	}
++	zval rv, ret;
++	zval *error = read_prop(zend_ce_err, ZEND_THIS, PROP_ERROR, sizeof(PROP_ERROR) - 1, &rv);
++	if (call_unary(&fci, &fcc, error, &ret) == SUCCESS) {
++		if (!require_instance(&ret, zend_ce_result, "Result::orElse() callback must return a Result")) {
++			RETURN_THROWS();
++		}
++		RETURN_COPY_VALUE(&ret);
++	}
++}
++
++ZEND_METHOD(Result, unwrap)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	if (instance_of(ZEND_THIS, zend_ce_ok)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	zend_throw_error(NULL, "Called unwrap() on an Err");
++	RETURN_THROWS();
++}
++
++ZEND_METHOD(Result, expect)
++{
++	zend_string *message;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_STR(message)
++	ZEND_PARSE_PARAMETERS_END();
++	if (instance_of(ZEND_THIS, zend_ce_ok)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	zend_throw_error(NULL, "%s", ZSTR_VAL(message));
++	RETURN_THROWS();
++}
++
++ZEND_METHOD(Result, toOption)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	if (instance_of(ZEND_THIS, zend_ce_ok)) {
++		zval rv;
++		zval *value = read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++		make_wrapped(return_value, zend_ce_some, PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++	} else {
++		object_init_ex(return_value, zend_ce_none);
++	}
++}
++
++ZEND_METHOD(Result, toNullable)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	if (instance_of(ZEND_THIS, zend_ce_ok)) {
++		zval rv;
++		RETURN_COPY(read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv));
++	}
++	RETURN_NULL();
++}
++
++/* Run $fn(); capture any thrown Throwable into Err, otherwise wrap in Ok. */
++ZEND_METHOD(Result, try)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	zval ret;
++	ZVAL_UNDEF(&ret);
++	fci.param_count = 0;
++	fci.params = NULL;
++	fci.named_params = NULL;
++	fci.retval = &ret;
++	zend_call_function(&fci, &fcc);
++
++	if (EG(exception)) {
++		zend_object *ex = EG(exception);
++		GC_ADDREF(ex);
++		zend_clear_exception();
++		zval err;
++		ZVAL_OBJ(&err, ex);
++		make_wrapped(return_value, zend_ce_err, PROP_ERROR, sizeof(PROP_ERROR) - 1, &err);
++		zval_ptr_dtor(&err);
++	} else {
++		make_wrapped(return_value, zend_ce_ok, PROP_VALUE, sizeof(PROP_VALUE) - 1, &ret);
++		zval_ptr_dtor(&ret);
++	}
++}
++
++/* Sequence: all Ok -> Ok([values]); first Err is returned as-is. Keys preserved. */
++ZEND_METHOD(Result, all)
++{
++	HashTable *arr;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ARRAY_HT(arr)
++	ZEND_PARSE_PARAMETERS_END();
++
++	zval out;
++	array_init(&out);
++	zend_string *key;
++	zend_ulong idx;
++	zval *entry;
++	ZEND_HASH_FOREACH_KEY_VAL(arr, idx, key, entry) {
++		ZVAL_DEREF(entry);
++		if (Z_TYPE_P(entry) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(entry), zend_ce_result)) {
++			zval_ptr_dtor(&out);
++			zend_throw_error(NULL, "Result::all() expects an array of Result");
++			RETURN_THROWS();
++		}
++		if (instanceof_function(Z_OBJCE_P(entry), zend_ce_err)) {
++			zval_ptr_dtor(&out);
++			RETURN_COPY(entry);
++		}
++		zval rv;
++		zval *v = read_prop(zend_ce_ok, entry, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++		Z_TRY_ADDREF_P(v);
++		if (key) {
++			zend_hash_update(Z_ARRVAL(out), key, v);
++		} else {
++			zend_hash_index_update(Z_ARRVAL(out), idx, v);
++		}
++	} ZEND_HASH_FOREACH_END();
++
++	make_wrapped(return_value, zend_ce_ok, PROP_VALUE, sizeof(PROP_VALUE) - 1, &out);
++	zval_ptr_dtor(&out);
++}
++
++ZEND_METHOD(Result, __toString)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	smart_str s = {0};
++	if (instance_of(ZEND_THIS, zend_ce_ok)) {
++		zval rv;
++		zval *v = read_prop(zend_ce_ok, ZEND_THIS, PROP_VALUE, sizeof(PROP_VALUE) - 1, &rv);
++		smart_str_appends(&s, "Ok(");
++		append_value_repr(&s, v);
++		smart_str_appendc(&s, ')');
++	} else {
++		zval rv;
++		zval *v = read_prop(zend_ce_err, ZEND_THIS, PROP_ERROR, sizeof(PROP_ERROR) - 1, &rv);
++		smart_str_appends(&s, "Err(");
++		append_value_repr(&s, v);
++		smart_str_appendc(&s, ')');
++	}
++	smart_str_0(&s);
++	RETURN_STR(smart_str_extract(&s));
++}
++
++/* ---------------- Ok / Err ---------------- */
++
++ZEND_METHOD(Ok, __construct)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(value)
++	ZEND_PARSE_PARAMETERS_END();
++	zend_update_property(zend_ce_ok, Z_OBJ_P(ZEND_THIS), PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++}
++
++ZEND_METHOD(Err, __construct)
++{
++	zval *error;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(error)
++	ZEND_PARSE_PARAMETERS_END();
++	zend_update_property(zend_ce_err, Z_OBJ_P(ZEND_THIS), PROP_ERROR, sizeof(PROP_ERROR) - 1, error);
++}
++
++/* ---------------- global helper functions ---------------- */
++
++ZEND_FUNCTION(Some)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(value)
++	ZEND_PARSE_PARAMETERS_END();
++	make_wrapped(return_value, zend_ce_some, PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++}
++
++ZEND_FUNCTION(None)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	object_init_ex(return_value, zend_ce_none);
++}
++
++ZEND_FUNCTION(Ok)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(value)
++	ZEND_PARSE_PARAMETERS_END();
++	make_wrapped(return_value, zend_ce_ok, PROP_VALUE, sizeof(PROP_VALUE) - 1, value);
++}
++
++ZEND_FUNCTION(Err)
++{
++	zval *error;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(error)
++	ZEND_PARSE_PARAMETERS_END();
++	make_wrapped(return_value, zend_ce_err, PROP_ERROR, sizeof(PROP_ERROR) - 1, error);
++}
++
++/* ---------------- registration ---------------- */
++
++void zend_register_option_result(void)
++{
++	zend_ce_propagatable = register_class_Propagatable();
++
++	zend_ce_option = register_class_Option(zend_ce_propagatable);
++	zend_ce_some = register_class_Some(zend_ce_option);
++	zend_ce_none = register_class_None(zend_ce_option);
++
++	zend_ce_result = register_class_Result(zend_ce_propagatable);
++	zend_ce_ok = register_class_Ok(zend_ce_result);
++	zend_ce_err = register_class_Err(zend_ce_result);
++
++	zend_register_functions(NULL, ext_functions, NULL, MODULE_PERSISTENT);
++}
+diff --git a/Zend/zend_option_result.h b/Zend/zend_option_result.h
+new file mode 100644
+index 00000000..c658e5f2
+--- /dev/null
++++ b/Zend/zend_option_result.h
+@@ -0,0 +1,26 @@
++/*
++   +----------------------------------------------------------------------+
++   | Built-in Option/Result types for the `?` propagation operator.       |
++   +----------------------------------------------------------------------+
++*/
++
++#ifndef ZEND_OPTION_RESULT_H
++#define ZEND_OPTION_RESULT_H
++
++#include "zend.h"
++
++BEGIN_EXTERN_C()
++
++extern ZEND_API zend_class_entry *zend_ce_propagatable;
++extern ZEND_API zend_class_entry *zend_ce_option;
++extern ZEND_API zend_class_entry *zend_ce_some;
++extern ZEND_API zend_class_entry *zend_ce_none;
++extern ZEND_API zend_class_entry *zend_ce_result;
++extern ZEND_API zend_class_entry *zend_ce_ok;
++extern ZEND_API zend_class_entry *zend_ce_err;
++
++void zend_register_option_result(void);
++
++END_EXTERN_C()
++
++#endif /* ZEND_OPTION_RESULT_H */
+diff --git a/Zend/zend_option_result.stub.php b/Zend/zend_option_result.stub.php
+new file mode 100644
+index 00000000..aef77b7b
+--- /dev/null
++++ b/Zend/zend_option_result.stub.php
+@@ -0,0 +1,89 @@
++<?php
++
++/** @generate-class-entries */
++
++/**
++ * Implemented by any value the postfix `?` propagation operator understands.
++ * When `EXPR?` is evaluated, the engine calls isFailure(); if true it returns
++ * the value from the enclosing function, otherwise it unwraps via getValue().
++ */
++interface Propagatable
++{
++    public function isFailure(): bool;
++    public function getValue(): mixed;
++}
++
++abstract class Option implements Propagatable
++{
++    final public static function some(mixed $value): Some {}
++    final public static function none(): None {}
++    final public function isSome(): bool {}
++    final public function isNone(): bool {}
++    final public function isFailure(): bool {}
++    public function getValue(): mixed {}
++    final public function unwrapOr(mixed $default): mixed {}
++    final public function map(callable $fn): Option {}
++    final public function flatMap(callable $fn): Option {}
++    final public function filter(callable $fn): Option {}
++    final public function orElse(callable $fn): Option {}
++    final public function unwrap(): mixed {}
++    final public function expect(string $message): mixed {}
++    final public function okOr(mixed $error): Result {}
++    final public function toNullable(): mixed {}
++    final public static function fromNullable(mixed $value): Option {}
++    final public static function all(array $options): Option {}
++    public function __toString(): string {}
++}
++
++final class Some extends Option
++{
++    public mixed $value;
++    public function __construct(mixed $value) {}
++}
++
++final class None extends Option
++{
++}
++
++abstract class Result implements Propagatable
++{
++    final public static function ok(mixed $value): Ok {}
++    final public static function err(mixed $error): Err {}
++    final public function isOk(): bool {}
++    final public function isErr(): bool {}
++    final public function isFailure(): bool {}
++    public function getValue(): mixed {}
++    final public function getError(): mixed {}
++    final public function unwrapOr(mixed $default): mixed {}
++    final public function map(callable $fn): Result {}
++    final public function flatMap(callable $fn): Result {}
++    final public function mapErr(callable $fn): Result {}
++    final public function orElse(callable $fn): Result {}
++    final public function unwrap(): mixed {}
++    final public function expect(string $message): mixed {}
++    final public function toOption(): Option {}
++    final public function toNullable(): mixed {}
++    final public static function try(callable $fn): Result {}
++    final public static function all(array $results): Result {}
++    public function __toString(): string {}
++}
++
++final class Ok extends Result
++{
++    public mixed $value;
++    public function __construct(mixed $value) {}
++}
++
++final class Err extends Result
++{
++    public mixed $error;
++    public function __construct(mixed $error) {}
++}
++
++function Some(mixed $value): Some {}
++
++function None(): None {}
++
++function Ok(mixed $value): Ok {}
++
++function Err(mixed $error): Err {}
+diff --git a/Zend/zend_option_result_arginfo.h b/Zend/zend_option_result_arginfo.h
+new file mode 100644
+index 00000000..eee5e7cb
+--- /dev/null
++++ b/Zend/zend_option_result_arginfo.h
+@@ -0,0 +1,330 @@
++/* This is a generated file, edit the .stub.php file instead.
++ * Stub hash: 4be190c35c908dd56265e97da80551db59626e28 */
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Some, 0, 1, Some, 0)
++	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_None, 0, 0, None, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Ok, 0, 1, Ok, 0)
++	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Err, 0, 1, Err, 0)
++	ZEND_ARG_TYPE_INFO(0, error, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Propagatable_isFailure, 0, 0, _IS_BOOL, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Propagatable_getValue, 0, 0, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Option_some arginfo_Some
++
++#define arginfo_class_Option_none arginfo_None
++
++#define arginfo_class_Option_isSome arginfo_class_Propagatable_isFailure
++
++#define arginfo_class_Option_isNone arginfo_class_Propagatable_isFailure
++
++#define arginfo_class_Option_isFailure arginfo_class_Propagatable_isFailure
++
++#define arginfo_class_Option_getValue arginfo_class_Propagatable_getValue
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Option_unwrapOr, 0, 1, IS_MIXED, 0)
++	ZEND_ARG_TYPE_INFO(0, default, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Option_map, 0, 1, Option, 0)
++	ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Option_flatMap arginfo_class_Option_map
++
++#define arginfo_class_Option_filter arginfo_class_Option_map
++
++#define arginfo_class_Option_orElse arginfo_class_Option_map
++
++#define arginfo_class_Option_unwrap arginfo_class_Propagatable_getValue
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Option_expect, 0, 1, IS_MIXED, 0)
++	ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Option_okOr, 0, 1, Result, 0)
++	ZEND_ARG_TYPE_INFO(0, error, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Option_toNullable arginfo_class_Propagatable_getValue
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Option_fromNullable, 0, 1, Option, 0)
++	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Option_all, 0, 1, Option, 0)
++	ZEND_ARG_TYPE_INFO(0, options, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Option___toString, 0, 0, IS_STRING, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Some___construct, 0, 0, 1)
++	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Result_ok arginfo_Ok
++
++#define arginfo_class_Result_err arginfo_Err
++
++#define arginfo_class_Result_isOk arginfo_class_Propagatable_isFailure
++
++#define arginfo_class_Result_isErr arginfo_class_Propagatable_isFailure
++
++#define arginfo_class_Result_isFailure arginfo_class_Propagatable_isFailure
++
++#define arginfo_class_Result_getValue arginfo_class_Propagatable_getValue
++
++#define arginfo_class_Result_getError arginfo_class_Propagatable_getValue
++
++#define arginfo_class_Result_unwrapOr arginfo_class_Option_unwrapOr
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Result_map, 0, 1, Result, 0)
++	ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Result_flatMap arginfo_class_Result_map
++
++#define arginfo_class_Result_mapErr arginfo_class_Result_map
++
++#define arginfo_class_Result_orElse arginfo_class_Result_map
++
++#define arginfo_class_Result_unwrap arginfo_class_Propagatable_getValue
++
++#define arginfo_class_Result_expect arginfo_class_Option_expect
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Result_toOption, 0, 0, Option, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Result_toNullable arginfo_class_Propagatable_getValue
++
++#define arginfo_class_Result_try arginfo_class_Result_map
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Result_all, 0, 1, Result, 0)
++	ZEND_ARG_TYPE_INFO(0, results, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Result___toString arginfo_class_Option___toString
++
++#define arginfo_class_Ok___construct arginfo_class_Some___construct
++
++ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Err___construct, 0, 0, 1)
++	ZEND_ARG_TYPE_INFO(0, error, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_FUNCTION(Some);
++ZEND_FUNCTION(None);
++ZEND_FUNCTION(Ok);
++ZEND_FUNCTION(Err);
++ZEND_METHOD(Option, some);
++ZEND_METHOD(Option, none);
++ZEND_METHOD(Option, isSome);
++ZEND_METHOD(Option, isNone);
++ZEND_METHOD(Option, isFailure);
++ZEND_METHOD(Option, getValue);
++ZEND_METHOD(Option, unwrapOr);
++ZEND_METHOD(Option, map);
++ZEND_METHOD(Option, flatMap);
++ZEND_METHOD(Option, filter);
++ZEND_METHOD(Option, orElse);
++ZEND_METHOD(Option, unwrap);
++ZEND_METHOD(Option, expect);
++ZEND_METHOD(Option, okOr);
++ZEND_METHOD(Option, toNullable);
++ZEND_METHOD(Option, fromNullable);
++ZEND_METHOD(Option, all);
++ZEND_METHOD(Option, __toString);
++ZEND_METHOD(Some, __construct);
++ZEND_METHOD(Result, ok);
++ZEND_METHOD(Result, err);
++ZEND_METHOD(Result, isOk);
++ZEND_METHOD(Result, isErr);
++ZEND_METHOD(Result, isFailure);
++ZEND_METHOD(Result, getValue);
++ZEND_METHOD(Result, getError);
++ZEND_METHOD(Result, unwrapOr);
++ZEND_METHOD(Result, map);
++ZEND_METHOD(Result, flatMap);
++ZEND_METHOD(Result, mapErr);
++ZEND_METHOD(Result, orElse);
++ZEND_METHOD(Result, unwrap);
++ZEND_METHOD(Result, expect);
++ZEND_METHOD(Result, toOption);
++ZEND_METHOD(Result, toNullable);
++ZEND_METHOD(Result, try);
++ZEND_METHOD(Result, all);
++ZEND_METHOD(Result, __toString);
++ZEND_METHOD(Ok, __construct);
++ZEND_METHOD(Err, __construct);
++
++static const zend_function_entry ext_functions[] = {
++	ZEND_FE(Some, arginfo_Some)
++	ZEND_FE(None, arginfo_None)
++	ZEND_FE(Ok, arginfo_Ok)
++	ZEND_FE(Err, arginfo_Err)
++	ZEND_FE_END
++};
++
++static const zend_function_entry class_Propagatable_methods[] = {
++	ZEND_RAW_FENTRY("isFailure", NULL, arginfo_class_Propagatable_isFailure, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
++	ZEND_RAW_FENTRY("getValue", NULL, arginfo_class_Propagatable_getValue, ZEND_ACC_PUBLIC|ZEND_ACC_ABSTRACT, NULL, NULL)
++	ZEND_FE_END
++};
++
++static const zend_function_entry class_Option_methods[] = {
++	ZEND_ME(Option, some, arginfo_class_Option_some, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, none, arginfo_class_Option_none, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, isSome, arginfo_class_Option_isSome, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, isNone, arginfo_class_Option_isNone, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, isFailure, arginfo_class_Option_isFailure, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, getValue, arginfo_class_Option_getValue, ZEND_ACC_PUBLIC)
++	ZEND_ME(Option, unwrapOr, arginfo_class_Option_unwrapOr, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, map, arginfo_class_Option_map, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, flatMap, arginfo_class_Option_flatMap, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, filter, arginfo_class_Option_filter, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, orElse, arginfo_class_Option_orElse, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, unwrap, arginfo_class_Option_unwrap, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, expect, arginfo_class_Option_expect, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, okOr, arginfo_class_Option_okOr, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, toNullable, arginfo_class_Option_toNullable, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, fromNullable, arginfo_class_Option_fromNullable, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, all, arginfo_class_Option_all, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC|ZEND_ACC_FINAL)
++	ZEND_ME(Option, __toString, arginfo_class_Option___toString, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static const zend_function_entry class_Some_methods[] = {
++	ZEND_ME(Some, __construct, arginfo_class_Some___construct, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static const zend_function_entry class_Result_methods[] = {
++	ZEND_ME(Result, ok, arginfo_class_Result_ok, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, err, arginfo_class_Result_err, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, isOk, arginfo_class_Result_isOk, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, isErr, arginfo_class_Result_isErr, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, isFailure, arginfo_class_Result_isFailure, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, getValue, arginfo_class_Result_getValue, ZEND_ACC_PUBLIC)
++	ZEND_ME(Result, getError, arginfo_class_Result_getError, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, unwrapOr, arginfo_class_Result_unwrapOr, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, map, arginfo_class_Result_map, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, flatMap, arginfo_class_Result_flatMap, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, mapErr, arginfo_class_Result_mapErr, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, orElse, arginfo_class_Result_orElse, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, unwrap, arginfo_class_Result_unwrap, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, expect, arginfo_class_Result_expect, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, toOption, arginfo_class_Result_toOption, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, toNullable, arginfo_class_Result_toNullable, ZEND_ACC_PUBLIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, try, arginfo_class_Result_try, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, all, arginfo_class_Result_all, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC|ZEND_ACC_FINAL)
++	ZEND_ME(Result, __toString, arginfo_class_Result___toString, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static const zend_function_entry class_Ok_methods[] = {
++	ZEND_ME(Ok, __construct, arginfo_class_Ok___construct, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static const zend_function_entry class_Err_methods[] = {
++	ZEND_ME(Err, __construct, arginfo_class_Err___construct, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static zend_class_entry *register_class_Propagatable(void)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Propagatable", class_Propagatable_methods);
++	class_entry = zend_register_internal_interface(&ce);
++
++	return class_entry;
++}
++
++static zend_class_entry *register_class_Option(zend_class_entry *class_entry_Propagatable)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Option", class_Option_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_ABSTRACT);
++	zend_class_implements(class_entry, 1, class_entry_Propagatable);
++
++	return class_entry;
++}
++
++static zend_class_entry *register_class_Some(zend_class_entry *class_entry_Option)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Some", class_Some_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Option, ZEND_ACC_FINAL);
++
++	zval property_value_default_value;
++	ZVAL_UNDEF(&property_value_default_value);
++	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_VALUE), &property_value_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_ANY));
++
++	return class_entry;
++}
++
++static zend_class_entry *register_class_None(zend_class_entry *class_entry_Option)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "None", NULL);
++	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Option, ZEND_ACC_FINAL);
++
++	return class_entry;
++}
++
++static zend_class_entry *register_class_Result(zend_class_entry *class_entry_Propagatable)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Result", class_Result_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_ABSTRACT);
++	zend_class_implements(class_entry, 1, class_entry_Propagatable);
++
++	return class_entry;
++}
++
++static zend_class_entry *register_class_Ok(zend_class_entry *class_entry_Result)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Ok", class_Ok_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Result, ZEND_ACC_FINAL);
++
++	zval property_value_default_value;
++	ZVAL_UNDEF(&property_value_default_value);
++	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_VALUE), &property_value_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_ANY));
++
++	return class_entry;
++}
++
++static zend_class_entry *register_class_Err(zend_class_entry *class_entry_Result)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Err", class_Err_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Result, ZEND_ACC_FINAL);
++
++	zval property_error_default_value;
++	ZVAL_UNDEF(&property_error_default_value);
++	zend_string *property_error_name = zend_string_init("error", sizeof("error") - 1, 1);
++	zend_declare_typed_property(class_entry, property_error_name, &property_error_default_value, ZEND_ACC_PUBLIC, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_ANY));
++	zend_string_release(property_error_name);
++
++	return class_entry;
++}
+diff --git a/configure.ac b/configure.ac
+index d71eb21b..8a354c3b 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1745,6 +1745,7 @@ PHP_ADD_SOURCES([Zend], m4_normalize([
+     zend_constants.c
+     zend_cpuinfo.c
+     zend_default_classes.c
++    zend_option_result.c
+     zend_dtrace.c
+     zend_enum.c
+     zend_exceptions.c

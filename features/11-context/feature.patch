@@ -1,0 +1,1151 @@
+diff --git a/Zend/tests/context.phpt b/Zend/tests/context.phpt
+new file mode 100644
+index 00000000..3a06339c
+--- /dev/null
++++ b/Zend/tests/context.phpt
+@@ -0,0 +1,77 @@
++--TEST--
++context parameters / provide (implicits): resolution, propagation, scope
++--FILE--
++<?php
++
++interface Clock { public function time(): int; }
++class SystemClock implements Clock {
++    public function __construct(private int $t) {}
++    public function time(): int { return $this->t; }
++}
++
++function now(context Clock $c): int { return $c->time(); }
++
++// 1. block form: value active for everything called inside, auto-supplied
++provide new SystemClock(42) { echo now(), "\n"; }
++
++// 2. deep propagation: a context param several calls down sees it
++function a(): string { return b(); }
++function b(): string { return c(); }
++function c(context Clock $c): string { return "deep=" . $c->time(); }
++provide new SystemClock(7) { echo a(), "\n"; }
++
++// 3. statement form: active for the rest of the enclosing function
++function handler(): void {
++    provide new SystemClock(99);
++    echo "stmt=" . now() . "\n";
++}
++handler();
++
++// 4. nearest-wins: a nested provide shadows the outer, restored on exit
++provide new SystemClock(1) {
++    echo now(), "\n";                      // 1
++    provide new SystemClock(2) { echo now(), "\n"; }   // 2
++    echo now(), "\n";                      // 1 again
++}
++
++// 5. pop on exception: the value does not leak past the block
++try {
++    provide new SystemClock(5) { throw new Exception("boom"); }
++} catch (Exception $e) {
++    echo "caught\n";
++}
++try { now(); } catch (\Error $e) { echo $e->getMessage(), "\n"; }
++
++// 6. default is used when nothing is provided
++function withDefault(context Clock $c = new SystemClock(-1)): int { return $c->time(); }
++echo "default=" . withDefault() . "\n";
++provide new SystemClock(8) { echo "provided=" . withDefault() . "\n"; }
++
++// 7. interface/inheritance match
++class Toc extends SystemClock {}
++provide new Toc(123) { echo now(), "\n"; }
++
++// 8. context/provide remain usable as method names; `class Context` still parses
++class Holder {
++    public function context($x) { return "m$x"; }
++    public function provide() { return "p"; }
++}
++echo (new Holder)->context(1), (new Holder)->provide(), "\n";
++class Context { public int $x = 314; }
++echo (new Context)->x, "\n";
++
++?>
++--EXPECT--
++42
++deep=7
++stmt=99
++1
++2
++1
++caught
++No context value of type Clock is available
++default=-1
++provided=8
++123
++m1p
++314
+diff --git a/Zend/tests/context_comprehensive.phpt b/Zend/tests/context_comprehensive.phpt
+new file mode 100644
+index 00000000..8f869084
+--- /dev/null
++++ b/Zend/tests/context_comprehensive.phpt
+@@ -0,0 +1,47 @@
++--TEST--
++context/provide — resolution, nesting, statement form, default, missing, pop-on-throw
++--FILE--
++<?php
++interface Clock { public function now(): int; }
++class Fixed implements Clock { public function __construct(private int $t) {} public function now(): int { return $this->t; } }
++class RequestId { public function __construct(public string $id) {} }
++
++function currentTime(context Clock $c): int { return $c->now(); }
++function deep(context Clock $c): string { return "t=" . $c->now(); }
++
++// block form + resolution by interface
++provide new Fixed(1000) {
++    echo currentTime(), "\n";       // 1000, auto-supplied
++    echo deep(), "\n";              // propagates down the call chain
++}
++// nearest wins + shadowing restore
++provide new Fixed(1) {
++    echo currentTime(), "\n";       // 1
++    provide new Fixed(2) { echo currentTime(), "\n"; }  // 2
++    echo currentTime(), "\n";       // 1 again
++}
++// statement form: active for rest of function
++function handler(): void {
++    provide new RequestId("abc");
++    log_it();
++}
++function log_it(context RequestId $r): void { echo "req={$r->id}\n"; }
++handler();
++// default value when nothing provided
++function withDefault(context RequestId $r = new RequestId("default")): string { return $r->id; }
++echo withDefault(), "\n";
++// missing value is an error
++try { currentTime(); } catch (\Throwable $e) { echo "error: ", get_class($e), "\n"; }
++// provide pops even on throw
++try { provide new Fixed(9) { throw new Exception("boom"); } } catch (Throwable $e) {}
++try { currentTime(); } catch (\Throwable $e) { echo "popped ok\n"; }
++--EXPECT--
++1000
++t=1000
++1
++2
++1
++req=abc
++default
++error: Error
++popped ok
+diff --git a/Zend/tests/defer.phpt b/Zend/tests/defer.phpt
+new file mode 100644
+index 00000000..caeb295a
+--- /dev/null
++++ b/Zend/tests/defer.phpt
+@@ -0,0 +1,102 @@
++--TEST--
++defer — Go-style scope-exit cleanup (LIFO, on return and on exception)
++--FILE--
++<?php
++// LIFO on normal return: deferred calls run after the body, last-scheduled first.
++function lifo() {
++    defer printf("a\n");
++    defer printf("b\n");
++    echo "body\n";
++}
++lifo();
++
++// Runs during exception unwind too.
++function boom() {
++    defer printf("cleanup\n");
++    throw new RuntimeException("boom");
++}
++try {
++    boom();
++} catch (Throwable $e) {
++    echo "caught: ", $e->getMessage(), "\n";
++}
++
++// A defer inside a loop schedules one call per iteration; all run LIFO at exit.
++function loop() {
++    for ($i = 0; $i < 3; $i++) {
++        defer printf("[%d]", $i);
++    }
++    echo "loop-body\n";
++}
++loop();
++echo "\n";
++
++// Go-faithful capture: the arguments are evaluated at the defer point, not at exit.
++function capture() {
++    $x = 1;
++    defer printf("x=%d\n", $x);
++    $x = 2;
++}
++capture();
++
++// The receiver of a method call is likewise captured at the defer point.
++class Logger {
++    public function __construct(public string $tag) {}
++    public function flush() { printf("flush %s\n", $this->tag); }
++}
++function receiver() {
++    $log = new Logger("first");
++    defer $log->flush();
++    $log = new Logger("second");
++}
++receiver();
++
++// Static calls work too.
++class Greeter {
++    public static function bye($name) { printf("bye %s\n", $name); }
++}
++function static_call() {
++    defer Greeter::bye("x");
++    echo "work\n";
++}
++static_call();
++
++// Spread arguments are captured (flattened) at the defer point.
++function spread() {
++    $a = [1, 2, 3];
++    defer printf("%d-%d-%d\n", ...$a);
++    $a = [9];
++    echo "spread-body\n";
++}
++spread();
++
++// Deferred calls do not alter the return value.
++function ret() {
++    defer printf("after\n");
++    return 42;
++}
++var_dump(ret());
++
++// `defer` is only semi-reserved: still usable as a method name.
++class HasMethod {
++    public function defer() { return "method-ok\n"; }
++}
++echo (new HasMethod)->defer();
++?>
++--EXPECT--
++body
++b
++a
++cleanup
++caught: boom
++loop-body
++[2][1][0]
++x=1
++flush first
++work
++bye x
++spread-body
++1-2-3
++after
++int(42)
++method-ok
+diff --git a/Zend/tests/magic_methods/bug36214.phpt b/Zend/tests/magic_methods/bug36214.phpt
+index b2e3e5dd..72fdc83b 100644
+--- a/Zend/tests/magic_methods/bug36214.phpt
++++ b/Zend/tests/magic_methods/bug36214.phpt
+@@ -2,7 +2,7 @@
+ Bug #36214 (__get method works properly only when conditional operator is used)
+ --FILE--
+ <?php
+-class context {
++class ctxholder {
+   public $stack = array();
+ 
+   public function __set($name,$var) {
+@@ -14,7 +14,7 @@ class context {
+   }
+ }
+ 
+-$ctx = new context;
++$ctx = new ctxholder;
+ $ctx->comment_preview = array();
+ $ctx->comment_preview[0] = 1;
+ $ctx->comment_preview[1] = 2;
+diff --git a/Zend/zend_ast.c b/Zend/zend_ast.c
+index 9cb3c7aa..bad69ff7 100644
+--- a/Zend/zend_ast.c
++++ b/Zend/zend_ast.c
+@@ -2394,6 +2394,21 @@ simple_list:
+ 			APPEND_STR("__HALT_COMPILER()");
+ 		case ZEND_AST_ECHO:
+ 			APPEND_NODE_1("echo");
++		case ZEND_AST_DEFER:
++			APPEND_NODE_1("defer");
++		case ZEND_AST_PROVIDE_STMT:
++			smart_str_appends(str, "provide ");
++			zend_ast_export_ex(str, ast->child[0], 0, indent);
++			smart_str_appendc(str, ';');
++			break;
++		case ZEND_AST_PROVIDE:
++			smart_str_appends(str, "provide ");
++			zend_ast_export_ex(str, ast->child[0], 0, indent);
++			smart_str_appends(str, " {\n");
++			zend_ast_export_stmt(str, ast->child[1], indent + 1);
++			zend_ast_export_indent(str, indent);
++			smart_str_appendc(str, '}');
++			break;
+ 		case ZEND_AST_THROW:
+ 			APPEND_NODE_1("throw");
+ 		case ZEND_AST_GOTO:
+diff --git a/Zend/zend_ast.h b/Zend/zend_ast.h
+index fb48b187..05578ac6 100644
+--- a/Zend/zend_ast.h
++++ b/Zend/zend_ast.h
+@@ -99,6 +99,8 @@ enum _zend_ast_kind {
+ 	ZEND_AST_YIELD_FROM,
+ 	ZEND_AST_CLASS_NAME,
+ 
++	ZEND_AST_DEFER,
++	ZEND_AST_PROVIDE_STMT,
+ 	ZEND_AST_GLOBAL,
+ 	ZEND_AST_UNSET,
+ 	ZEND_AST_RETURN,
+@@ -155,6 +157,8 @@ enum _zend_ast_kind {
+ 	ZEND_AST_PARENT_PROPERTY_HOOK_CALL,
+ 	ZEND_AST_PIPE,
+ 
++	ZEND_AST_PROVIDE,
++
+ 	/* 3 child nodes */
+ 	ZEND_AST_METHOD_CALL = 3 << ZEND_AST_NUM_CHILDREN_SHIFT,
+ 	ZEND_AST_NULLSAFE_METHOD_CALL,
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..7d833815 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -6729,6 +6729,162 @@ static void zend_compile_match(znode *result, zend_ast *ast)
+ 	efree(jmp_end_opnums);
+ }
+ 
++/* --- `defer CALL;` (Go-style deferred call) --- */
++
++/* A ZEND_AST_VAR for the hidden per-frame DeferScope CV (leading digit -> not
++ * writable from userland, so it can never collide with a user variable). */
++static zend_ast *defer_hidden_var(void) /* {{{ */
++{
++	return zend_ast_create(ZEND_AST_VAR,
++		zend_ast_create_zval_from_str(zend_string_init("0defer", sizeof("0defer") - 1, 0)));
++}
++/* }}} */
++
++/* Desugar `defer callee(args);` to:
++ *   $<hidden> ??= new DeferScope();
++ *   $<hidden>->push(callee(...), [args]);
++ * The first-class-callable `callee(...)` captures the callee/receiver now and the
++ * `[args]` array captures the arguments now (Go-faithful); the DeferScope runs the
++ * collected calls LIFO when the frame is torn down (return or exception). */
++static void zend_compile_defer(zend_ast *ast) /* {{{ */
++{
++	zend_ast *call = ast->child[0];
++	uint32_t args_idx;
++
++	switch (call->kind) {
++		case ZEND_AST_CALL:
++			args_idx = 1;
++			break;
++		case ZEND_AST_METHOD_CALL:
++		case ZEND_AST_NULLSAFE_METHOD_CALL:
++		case ZEND_AST_STATIC_CALL:
++			args_idx = 2;
++			break;
++		default:
++			zend_error_noreturn(E_COMPILE_ERROR, "defer requires a function or method call");
++			return;
++	}
++
++	zend_ast_list *arglist = zend_ast_get_list(call->child[args_idx]);
++
++	/* [args...] — capture each argument now (positional + spread; named args
++	 * are not supported in v1). A spread `...$x` is carried over verbatim as an
++	 * ZEND_AST_UNPACK element of the array literal, so its elements are flattened
++	 * into the captured array at the defer point (Go-faithful). */
++	zend_ast *args_array = zend_ast_create_list(0, ZEND_AST_ARRAY);
++	for (uint32_t i = 0; i < arglist->children; i++) {
++		zend_ast *arg = arglist->child[i];
++		if (arg->kind == ZEND_AST_NAMED_ARG) {
++			zend_error_noreturn(E_COMPILE_ERROR,
++				"defer does not support named arguments");
++		}
++		arglist->child[i] = NULL; /* detach: reused in args_array */
++		if (arg->kind == ZEND_AST_UNPACK) {
++			args_array = zend_ast_list_add(args_array, arg);
++		} else {
++			args_array = zend_ast_list_add(args_array,
++				zend_ast_create_ex(ZEND_AST_ARRAY_ELEM, 0, arg, NULL));
++		}
++	}
++
++	/* Turn the call into a first-class callable `callee(...)` (captures callee now). */
++	call->child[args_idx] = zend_ast_create(ZEND_AST_CALLABLE_CONVERT);
++	ast->child[0] = NULL; /* detach the call; now owned by push_call below */
++	zend_ast *callee_fcc = call;
++
++	/* $<hidden> ??= new DeferScope(); */
++	zend_ast *cls = zend_ast_create_zval_from_str(
++		zend_string_init("DeferScope", sizeof("DeferScope") - 1, 0));
++	cls->attr = ZEND_NAME_FQ;
++	zend_ast *new_scope = zend_ast_create(ZEND_AST_NEW, cls,
++		zend_ast_create_list(0, ZEND_AST_ARG_LIST));
++	zend_ast *coalesce = zend_ast_create(ZEND_AST_ASSIGN_COALESCE,
++		defer_hidden_var(), new_scope);
++	znode r1;
++	zend_compile_expr(&r1, coalesce);
++	zend_do_free(&r1);
++	zend_ast_destroy(coalesce);
++
++	/* $<hidden>->push(callee(...), [args]); */
++	zend_ast *push_call = zend_ast_create(ZEND_AST_METHOD_CALL,
++		defer_hidden_var(),
++		zend_ast_create_zval_from_str(zend_string_init("push", sizeof("push") - 1, 0)),
++		zend_ast_create_list(2, ZEND_AST_ARG_LIST, callee_fcc, args_array));
++	znode r2;
++	zend_compile_expr(&r2, push_call);
++	zend_do_free(&r2);
++	zend_ast_destroy(push_call);
++}
++/* }}} */
++
++static void zend_compile_try(zend_ast *ast);
++
++/* Build a call to an internal context helper: `\name(arg)` (arg may be NULL). */
++static zend_ast *ctx_helper_call(const char *name, zend_ast *arg) /* {{{ */
++{
++	zend_ast *args = arg
++		? zend_ast_create_list(1, ZEND_AST_ARG_LIST, arg)
++		: zend_ast_create_list(0, ZEND_AST_ARG_LIST);
++	zend_ast *fname = zend_ast_create_zval_from_str(
++		zend_string_init(name, strlen(name), 0));
++	fname->attr = ZEND_NAME_FQ;
++	return zend_ast_create(ZEND_AST_CALL, fname, args);
++}
++/* }}} */
++
++/* Desugar the block form `provide V { B }` to:
++ *   __ctx_push(V);
++ *   try { B } finally { __ctx_pop(); }
++ * so the value is active for everything called inside B and is always popped on
++ * exit (return, break, or exception). */
++static void zend_compile_provide(zend_ast *ast) /* {{{ */
++{
++	zend_ast *value = ast->child[0];
++	ast->child[0] = NULL; /* detach: moved into the push call */
++	zend_ast *body = ast->child[1];
++	ast->child[1] = NULL; /* detach: moved into the try */
++
++	/* __ctx_push(V); */
++	zend_ast *push = ctx_helper_call("__ctx_push", value);
++	znode r;
++	zend_compile_expr(&r, push);
++	zend_do_free(&r);
++	zend_ast_destroy(push);
++
++	/* try { B } finally { __ctx_pop(); } */
++	zend_ast *finally = zend_ast_create_list(1, ZEND_AST_STMT_LIST,
++		ctx_helper_call("__ctx_pop", NULL));
++	zend_ast *catches = zend_ast_create_list(0, ZEND_AST_CATCH_LIST);
++	zend_ast *try_ast = zend_ast_create(ZEND_AST_TRY, body, catches, finally);
++	zend_compile_try(try_ast);
++	zend_ast_destroy(try_ast);
++}
++/* }}} */
++
++/* Desugar the statement form `provide V;` to:
++ *   __ctx_push(V);
++ *   defer __ctx_pop();
++ * making the value active for the rest of the enclosing function; the `defer`
++ * pops it when the frame is torn down (return or exception). */
++static void zend_compile_provide_stmt(zend_ast *ast) /* {{{ */
++{
++	zend_ast *value = ast->child[0];
++	ast->child[0] = NULL; /* detach: moved into the push call */
++
++	/* __ctx_push(V); */
++	zend_ast *push = ctx_helper_call("__ctx_push", value);
++	znode r;
++	zend_compile_expr(&r, push);
++	zend_do_free(&r);
++	zend_ast_destroy(push);
++
++	/* defer __ctx_pop(); */
++	zend_ast *defer_node = zend_ast_create(ZEND_AST_DEFER,
++		ctx_helper_call("__ctx_pop", NULL));
++	zend_compile_defer(defer_node);
++}
++/* }}} */
++
+ static void zend_compile_try(zend_ast *ast) /* {{{ */
+ {
+ 	zend_ast *try_ast = ast->child[0];
+@@ -8432,12 +8588,108 @@ static zend_string *zend_begin_func_decl(znode *result, zend_op_array *op_array,
+ }
+ /* }}} */
+ 
++/* Rewrite `context` parameters into a body prologue that pulls the value from the
++ * runtime context stack, then drop them from the signature. A param `context T $c`
++ * becomes, prepended to the body:
++ *
++ *   $c = \__ctx_resolve("T");                                 // no default
++ *   $c = \__ctx_has("T") ? \__ctx_resolve("T") : (DEFAULT);   // with default
++ *
++ * so arg_info / RECV numbering / reflection see a normal, context-free signature.
++ * Applied to named functions, methods and closures (block body required). */
++static zend_ast *ctx_name_call(const char *name, zend_ast *arglist) /* {{{ */
++{
++	zend_ast *fname = zend_ast_create_zval_from_str(zend_string_init(name, strlen(name), 0));
++	fname->attr = ZEND_NAME_FQ;
++	return zend_ast_create(ZEND_AST_CALL, fname, arglist);
++}
++/* }}} */
++
++static void zend_rewrite_context_params(zend_ast_decl *decl) /* {{{ */
++{
++	if (decl->kind != ZEND_AST_FUNC_DECL
++	 && decl->kind != ZEND_AST_METHOD
++	 && decl->kind != ZEND_AST_CLOSURE) {
++		return;
++	}
++	zend_ast *params_ast = decl->child[0];
++	if (!params_ast) {
++		return;
++	}
++	zend_ast_list *params = zend_ast_get_list(params_ast);
++
++	bool has_ctx = false;
++	for (uint32_t i = 0; i < params->children; i++) {
++		if (params->child[i] && (params->child[i]->attr & ZEND_PARAM_CONTEXT)) {
++			has_ctx = true;
++			break;
++		}
++	}
++	if (!has_ctx) {
++		return;
++	}
++	if (!decl->child[2]) {
++		zend_error_noreturn(E_COMPILE_ERROR,
++			"A context parameter requires a function body");
++	}
++
++	zend_ast *new_body = zend_ast_create_list(0, ZEND_AST_STMT_LIST);
++	uint32_t w = 0;
++	for (uint32_t i = 0; i < params->children; i++) {
++		zend_ast *param = params->child[i];
++		if (!param || !(param->attr & ZEND_PARAM_CONTEXT)) {
++			params->child[w++] = param;
++			continue;
++		}
++
++		zend_ast *type_ast = param->child[0];
++		if (!type_ast || type_ast->kind != ZEND_AST_ZVAL
++		 || Z_TYPE_P(zend_ast_get_zval(type_ast)) != IS_STRING
++		 || (type_ast->attr & ZEND_TYPE_NULLABLE)) {
++			zend_error_noreturn(E_COMPILE_ERROR,
++				"A context parameter must declare a single, non-nullable class type");
++		}
++		zend_string *type_name = zend_ast_get_str(type_ast);
++
++		zend_ast *var = zend_ast_create(ZEND_AST_VAR,
++			zend_ast_create_zval_from_str(zend_string_copy(zend_ast_get_str(param->child[1]))));
++		zend_ast *resolve = ctx_name_call("__ctx_resolve",
++			zend_ast_create_list(1, ZEND_AST_ARG_LIST,
++				zend_ast_create_zval_from_str(zend_string_copy(type_name))));
++
++		zend_ast *value;
++		if (param->child[2]) {
++			zend_ast *has = ctx_name_call("__ctx_has",
++				zend_ast_create_list(1, ZEND_AST_ARG_LIST,
++					zend_ast_create_zval_from_str(zend_string_copy(type_name))));
++			zend_ast *def = param->child[2];
++			param->child[2] = NULL; /* detach: reused below */
++			value = zend_ast_create(ZEND_AST_CONDITIONAL, has, resolve, def);
++		} else {
++			value = resolve;
++		}
++
++		new_body = zend_ast_list_add(new_body,
++			zend_ast_create(ZEND_AST_ASSIGN, var, value));
++		zend_ast_destroy(param);
++	}
++	params->children = w;
++
++	zend_ast_list *old_body = zend_ast_get_list(decl->child[2]);
++	for (uint32_t i = 0; i < old_body->children; i++) {
++		new_body = zend_ast_list_add(new_body, old_body->child[i]);
++	}
++	decl->child[2] = new_body;
++}
++/* }}} */
++
+ static zend_op_array *zend_compile_func_decl_ex(
+ 	znode *result, zend_ast *ast, enum func_decl_level level,
+ 	zend_string *property_info_name,
+ 	zend_property_hook_kind hook_kind
+ ) {
+ 	zend_ast_decl *decl = (zend_ast_decl *) ast;
++	zend_rewrite_context_params(decl);
+ 	zend_ast *params_ast = decl->child[0];
+ 	zend_ast *uses_ast = decl->child[1];
+ 	zend_ast *stmt_ast = decl->child[2];
+@@ -11708,6 +11960,15 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
+ 		case ZEND_AST_RETURN:
+ 			zend_compile_return(ast);
+ 			break;
++		case ZEND_AST_DEFER:
++			zend_compile_defer(ast);
++			break;
++		case ZEND_AST_PROVIDE:
++			zend_compile_provide(ast);
++			break;
++		case ZEND_AST_PROVIDE_STMT:
++			zend_compile_provide_stmt(ast);
++			break;
+ 		case ZEND_AST_ECHO:
+ 			zend_compile_echo(ast);
+ 			break;
+diff --git a/Zend/zend_compile.h b/Zend/zend_compile.h
+index c07fa9bf..edbf9f61 100644
+--- a/Zend/zend_compile.h
++++ b/Zend/zend_compile.h
+@@ -1041,6 +1041,10 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
+ /* These should not clash with ZEND_ACC_PPP_MASK and ZEND_ACC_PPP_SET_MASK */
+ #define ZEND_PARAM_REF      (1<<3)
+ #define ZEND_PARAM_VARIADIC (1<<4)
++/* `context` parameter marker. Stripped by the compile-time pre-pass that turns
++ * such params into a body prologue, so it never reaches real arg_info. Bit 6
++ * aliases ZEND_ACC_ABSTRACT, which is never a valid parameter modifier. */
++#define ZEND_PARAM_CONTEXT  (1<<6)
+ 
+ #define ZEND_NAME_FQ       0
+ #define ZEND_NAME_NOT_FQ   1
+diff --git a/Zend/zend_context.c b/Zend/zend_context.c
+new file mode 100644
+index 00000000..349a1ba9
+--- /dev/null
++++ b/Zend/zend_context.c
+@@ -0,0 +1,92 @@
++/*
++   +----------------------------------------------------------------------+
++   | Runtime support for `context` parameters / `provide` (implicits).     |
++   |                                                                      |
++   | `provide V { B }` and `provide V;` push an object onto a per-request  |
++   | context stack (EG(context_stack)); a `context T $c` parameter is      |
++   | compiled into a body prologue that resolves the nearest provided      |
++   | value whose class/interface matches T. Push/pop/has/resolve are the   |
++   | four internal helpers the compiler emits.                             |
++   +----------------------------------------------------------------------+
++*/
++
++#include "zend.h"
++#include "zend_API.h"
++#include "zend_compile.h"
++#include "zend_exceptions.h"
++#include "zend_execute.h"
++#include "zend_context.h"
++#include "zend_context_arginfo.h"
++
++ZEND_FUNCTION(__ctx_push)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_OBJECT(value)
++	ZEND_PARSE_PARAMETERS_END();
++
++	zval copy;
++	ZVAL_COPY(&copy, value);
++	zend_stack_push(&EG(context_stack), &copy);
++}
++
++ZEND_FUNCTION(__ctx_pop)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++
++	if (zend_stack_is_empty(&EG(context_stack))) {
++		return;
++	}
++	zval *top = zend_stack_top(&EG(context_stack));
++	zval_ptr_dtor(top);
++	zend_stack_del_top(&EG(context_stack));
++}
++
++/* Walk the context stack newest-first, returning the first provided object whose
++ * class or one of its interfaces matches `type`. NULL if none / unknown type. */
++static zval *ctx_find(zend_string *type)
++{
++	zend_class_entry *want = zend_lookup_class(type);
++	if (!want) {
++		return NULL;
++	}
++	int count = zend_stack_count(&EG(context_stack));
++	zval *base = (zval *) zend_stack_base(&EG(context_stack));
++	for (int i = count - 1; i >= 0; i--) {
++		zval *v = &base[i];
++		if (Z_TYPE_P(v) == IS_OBJECT && instanceof_function(Z_OBJCE_P(v), want)) {
++			return v;
++		}
++	}
++	return NULL;
++}
++
++ZEND_FUNCTION(__ctx_has)
++{
++	zend_string *type;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_STR(type)
++	ZEND_PARSE_PARAMETERS_END();
++
++	RETURN_BOOL(ctx_find(type) != NULL);
++}
++
++ZEND_FUNCTION(__ctx_resolve)
++{
++	zend_string *type;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_STR(type)
++	ZEND_PARSE_PARAMETERS_END();
++
++	zval *v = ctx_find(type);
++	if (!v) {
++		zend_throw_error(NULL, "No context value of type %s is available", ZSTR_VAL(type));
++		RETURN_THROWS();
++	}
++	RETURN_COPY(v);
++}
++
++void zend_register_context(void)
++{
++	zend_register_functions(NULL, ext_functions, NULL, MODULE_PERSISTENT);
++}
+diff --git a/Zend/zend_context.h b/Zend/zend_context.h
+new file mode 100644
+index 00000000..744f0b90
+--- /dev/null
++++ b/Zend/zend_context.h
+@@ -0,0 +1,18 @@
++/*
++   +----------------------------------------------------------------------+
++   | Runtime support for `context` parameters / `provide` (implicits).     |
++   +----------------------------------------------------------------------+
++*/
++
++#ifndef ZEND_CONTEXT_H
++#define ZEND_CONTEXT_H
++
++#include "zend.h"
++
++BEGIN_EXTERN_C()
++
++void zend_register_context(void);
++
++END_EXTERN_C()
++
++#endif /* ZEND_CONTEXT_H */
+diff --git a/Zend/zend_context.stub.php b/Zend/zend_context.stub.php
+new file mode 100644
+index 00000000..0e12684f
+--- /dev/null
++++ b/Zend/zend_context.stub.php
+@@ -0,0 +1,19 @@
++<?php
++
++/** @generate-class-entries */
++
++/**
++ * Internal helpers backing `context` parameters and `provide`. The compiler
++ * desugars `provide V { B }` to `__ctx_push(V); try { B } finally { __ctx_pop(); }`
++ * and `provide V;` to `__ctx_push(V); defer __ctx_pop();`, and rewrites a
++ * `context T $c` parameter into a body prologue that calls `__ctx_resolve("T")`
++ * (or `__ctx_has`/`__ctx_resolve` when a default is given). Not intended to be
++ * called directly.
++ */
++function __ctx_push(object $value): void {}
++
++function __ctx_pop(): void {}
++
++function __ctx_has(string $type): bool {}
++
++function __ctx_resolve(string $type): mixed {}
+diff --git a/Zend/zend_context_arginfo.h b/Zend/zend_context_arginfo.h
+new file mode 100644
+index 00000000..22dbfa1c
+--- /dev/null
++++ b/Zend/zend_context_arginfo.h
+@@ -0,0 +1,30 @@
++/* This is a generated file, edit the .stub.php file instead.
++ * Stub hash: 43075f6121f338268c9891b95cba787642ee88f2 */
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo___ctx_push, 0, 1, IS_VOID, 0)
++	ZEND_ARG_TYPE_INFO(0, value, IS_OBJECT, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo___ctx_pop, 0, 0, IS_VOID, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo___ctx_has, 0, 1, _IS_BOOL, 0)
++	ZEND_ARG_TYPE_INFO(0, type, IS_STRING, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo___ctx_resolve, 0, 1, IS_MIXED, 0)
++	ZEND_ARG_TYPE_INFO(0, type, IS_STRING, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_FUNCTION(__ctx_push);
++ZEND_FUNCTION(__ctx_pop);
++ZEND_FUNCTION(__ctx_has);
++ZEND_FUNCTION(__ctx_resolve);
++
++static const zend_function_entry ext_functions[] = {
++	ZEND_FE(__ctx_push, arginfo___ctx_push)
++	ZEND_FE(__ctx_pop, arginfo___ctx_pop)
++	ZEND_FE(__ctx_has, arginfo___ctx_has)
++	ZEND_FE(__ctx_resolve, arginfo___ctx_resolve)
++	ZEND_FE_END
++};
+diff --git a/Zend/zend_default_classes.c b/Zend/zend_default_classes.c
+index 7ab9b832..16684bb3 100644
+--- a/Zend/zend_default_classes.c
++++ b/Zend/zend_default_classes.c
+@@ -28,6 +28,8 @@
+ #include "zend_weakrefs.h"
+ #include "zend_enum.h"
+ #include "zend_fibers.h"
++#include "zend_defer.h"
++#include "zend_context.h"
+ 
+ ZEND_API void zend_register_default_classes(void)
+ {
+@@ -40,4 +42,6 @@ ZEND_API void zend_register_default_classes(void)
+ 	zend_register_attribute_ce();
+ 	zend_register_enum_ce();
+ 	zend_register_fiber_ce();
++	zend_register_defer();
++	zend_register_context();
+ }
+diff --git a/Zend/zend_defer.c b/Zend/zend_defer.c
+new file mode 100644
+index 00000000..5e103bd8
+--- /dev/null
++++ b/Zend/zend_defer.c
+@@ -0,0 +1,81 @@
++#include "zend.h"
++#include "zend_API.h"
++#include "zend_exceptions.h"
++#include "zend_defer.h"
++#include "zend_defer_arginfo.h"
++
++ZEND_API zend_class_entry *zend_ce_defer_scope;
++
++ZEND_METHOD(DeferScope, push)
++{
++	zval *fn, *args;
++	ZEND_PARSE_PARAMETERS_START(2, 2)
++		Z_PARAM_ZVAL(fn)
++		Z_PARAM_ZVAL(args)
++	ZEND_PARSE_PARAMETERS_END();
++
++	zval pair;
++	array_init_size(&pair, 2);
++	Z_TRY_ADDREF_P(fn);
++	add_next_index_zval(&pair, fn);
++	Z_TRY_ADDREF_P(args);
++	add_next_index_zval(&pair, args);
++
++	zval *entries = OBJ_PROP_NUM(Z_OBJ_P(ZEND_THIS), 0);
++	ZVAL_DEREF(entries);
++	/* The declared default `[]` is the engine's *immutable* empty array, which
++	 * SEPARATE_ARRAY won't clone (its refcount is 1). Install a fresh, owned
++	 * array the first time we push; thereafter separate as usual. */
++	HashTable *ht;
++	if (!Z_REFCOUNTED_P(entries)) {
++		ht = zend_new_array(8);
++		ZVAL_ARR(entries, ht);
++	} else {
++		SEPARATE_ARRAY(entries);
++		ht = Z_ARR_P(entries);
++	}
++	zend_hash_next_index_insert(ht, &pair);
++}
++
++ZEND_METHOD(DeferScope, __destruct)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++
++	zval *entries = OBJ_PROP_NUM(Z_OBJ_P(ZEND_THIS), 0);
++	ZVAL_DEREF(entries);
++	if (Z_TYPE_P(entries) != IS_ARRAY) {
++		return;
++	}
++
++	zval *pair;
++	ZEND_HASH_REVERSE_FOREACH_VAL(Z_ARRVAL_P(entries), pair) {
++		ZVAL_DEREF(pair);
++		zval *fn = zend_hash_index_find(Z_ARRVAL_P(pair), 0);
++		zval *args = zend_hash_index_find(Z_ARRVAL_P(pair), 1);
++		if (!fn || !args) {
++			continue;
++		}
++		zend_fcall_info fci;
++		zend_fcall_info_cache fcc;
++		char *error = NULL;
++		if (zend_fcall_info_init(fn, 0, &fci, &fcc, NULL, &error) == SUCCESS) {
++			zval ret;
++			ZVAL_UNDEF(&ret);
++			fci.retval = &ret;
++			zend_fcall_info_args(&fci, args);
++			zend_call_function(&fci, &fcc);
++			zend_fcall_info_args_clear(&fci, 1);
++			zval_ptr_dtor(&ret);
++		} else if (error) {
++			efree(error);
++		}
++		if (EG(exception)) {
++			break; /* stop running further defers once one throws */
++		}
++	} ZEND_HASH_FOREACH_END();
++}
++
++void zend_register_defer(void)
++{
++	zend_ce_defer_scope = register_class_DeferScope();
++}
+diff --git a/Zend/zend_defer.h b/Zend/zend_defer.h
+new file mode 100644
+index 00000000..eb97a95c
+--- /dev/null
++++ b/Zend/zend_defer.h
+@@ -0,0 +1,21 @@
++/*
++   +----------------------------------------------------------------------+
++   | DeferScope — runtime support for the `defer` statement.              |
++   |                                                                      |
++   | A per-frame collector: the compiler lowers each `defer CALL;` to     |
++   | `$<hidden> ??= new DeferScope(); $<hidden>->push(callee(...), [args])`|
++   | and the destructor replays the collected calls LIFO on scope exit.   |
++   +----------------------------------------------------------------------+
++*/
++
++#ifndef ZEND_DEFER_H
++#define ZEND_DEFER_H
++
++#include "zend.h"
++
++BEGIN_EXTERN_C()
++extern ZEND_API zend_class_entry *zend_ce_defer_scope;
++void zend_register_defer(void);
++END_EXTERN_C()
++
++#endif /* ZEND_DEFER_H */
+diff --git a/Zend/zend_defer.stub.php b/Zend/zend_defer.stub.php
+new file mode 100644
+index 00000000..21a379ef
+--- /dev/null
++++ b/Zend/zend_defer.stub.php
+@@ -0,0 +1,15 @@
++<?php
++
++/** @generate-class-entries */
++
++/**
++ * Per-frame collector for `defer` statements (internal). The compiler emits
++ * `$<hidden> ??= new DeferScope(); $<hidden>->push(callee(...), [args]);` and the
++ * destructor runs the collected calls LIFO when the frame is torn down.
++ */
++final class DeferScope
++{
++    private array $entries = [];
++    public function push(callable $fn, array $args): void {}
++    public function __destruct() {}
++}
+diff --git a/Zend/zend_defer_arginfo.h b/Zend/zend_defer_arginfo.h
+new file mode 100644
+index 00000000..a85465ea
+--- /dev/null
++++ b/Zend/zend_defer_arginfo.h
+@@ -0,0 +1,35 @@
++/* This is a generated file, edit the .stub.php file instead.
++ * Stub hash: 6ecc478aedc186cf4d459c1daa826b1fdc6112cd */
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_DeferScope_push, 0, 2, IS_VOID, 0)
++	ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
++	ZEND_ARG_TYPE_INFO(0, args, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_INFO_EX(arginfo_class_DeferScope___destruct, 0, 0, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_METHOD(DeferScope, push);
++ZEND_METHOD(DeferScope, __destruct);
++
++static const zend_function_entry class_DeferScope_methods[] = {
++	ZEND_ME(DeferScope, push, arginfo_class_DeferScope_push, ZEND_ACC_PUBLIC)
++	ZEND_ME(DeferScope, __destruct, arginfo_class_DeferScope___destruct, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static zend_class_entry *register_class_DeferScope(void)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "DeferScope", class_DeferScope_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
++
++	zval property_entries_default_value;
++	ZVAL_EMPTY_ARRAY(&property_entries_default_value);
++	zend_string *property_entries_name = zend_string_init("entries", sizeof("entries") - 1, 1);
++	zend_declare_typed_property(class_entry, property_entries_name, &property_entries_default_value, ZEND_ACC_PRIVATE, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_ARRAY));
++	zend_string_release(property_entries_name);
++
++	return class_entry;
++}
+diff --git a/Zend/zend_execute_API.c b/Zend/zend_execute_API.c
+index 0719fcbb..a9699661 100644
+--- a/Zend/zend_execute_API.c
++++ b/Zend/zend_execute_API.c
+@@ -167,6 +167,7 @@ void init_executor(void) /* {{{ */
+ 	zend_stack_init(&EG(user_error_handlers_error_reporting), sizeof(int));
+ 	zend_stack_init(&EG(user_error_handlers), sizeof(zval));
+ 	zend_stack_init(&EG(user_exception_handlers), sizeof(zval));
++	zend_stack_init(&EG(context_stack), sizeof(zval));
+ 
+ 	zend_objects_store_init(&EG(objects_store), 1024);
+ 	zend_lazy_objects_init(&EG(lazy_objects_store));
+@@ -417,6 +418,7 @@ ZEND_API void zend_shutdown_executor_values(bool fast_shutdown)
+ 		zend_stack_clean(&EG(user_error_handlers_error_reporting), NULL, 1);
+ 		zend_stack_clean(&EG(user_error_handlers), (void (*)(void *))ZVAL_PTR_DTOR, 1);
+ 		zend_stack_clean(&EG(user_exception_handlers), (void (*)(void *))ZVAL_PTR_DTOR, 1);
++		zend_stack_clean(&EG(context_stack), (void (*)(void *))ZVAL_PTR_DTOR, 1);
+ 
+ #if ZEND_DEBUG
+ 		if (!CG(unclean_shutdown)) {
+@@ -504,6 +506,7 @@ void shutdown_executor(void) /* {{{ */
+ 		zend_stack_destroy(&EG(user_error_handlers_error_reporting));
+ 		zend_stack_destroy(&EG(user_error_handlers));
+ 		zend_stack_destroy(&EG(user_exception_handlers));
++		zend_stack_destroy(&EG(context_stack));
+ 		zend_lazy_objects_destroy(&EG(lazy_objects_store));
+ 		zend_objects_store_destroy(&EG(objects_store));
+ 		if (EG(in_autoload)) {
+diff --git a/Zend/zend_globals.h b/Zend/zend_globals.h
+index 48b978b5..589089d6 100644
+--- a/Zend/zend_globals.h
++++ b/Zend/zend_globals.h
+@@ -241,6 +241,8 @@ struct _zend_executor_globals {
+ 	zend_stack user_error_handlers;
+ 	zend_stack user_exception_handlers;
+ 
++	zend_stack context_stack; /* `provide`d values for `context` parameters */
++
+ 	zend_class_entry      *exception_class;
+ 	zend_error_handling_t  error_handling;
+ 
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..6e259850 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -116,6 +116,9 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token <ident> T_CLONE         "'clone'"
+ %token <ident> T_EXIT          "'exit'"
+ %token <ident> T_IF            "'if'"
++%token <ident> T_CONTEXT       "'context'"
++%token <ident> T_PROVIDE       "'provide'"
++%token <ident> T_DEFER         "'defer'"
+ %token <ident> T_ELSEIF        "'elseif'"
+ %token <ident> T_ELSE          "'else'"
+ %token <ident> T_ENDIF         "'endif'"
+@@ -290,7 +293,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %type <ast> optional_parameter_list clone_argument_list non_empty_clone_argument_list
+ 
+ %type <num> returns_ref function fn is_reference is_variadic property_modifiers property_hook_modifiers
+-%type <num> method_modifiers class_const_modifiers member_modifier optional_cpp_modifiers
++%type <num> method_modifiers class_const_modifiers member_modifier optional_cpp_modifiers optional_context
+ %type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags
+ 
+ %type <ptr> backup_lex_pos
+@@ -306,7 +309,7 @@ start:
+ 
+ reserved_non_modifiers:
+ 	  T_INCLUDE | T_INCLUDE_ONCE | T_EVAL | T_REQUIRE | T_REQUIRE_ONCE | T_LOGICAL_OR | T_LOGICAL_XOR | T_LOGICAL_AND
+-	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
++	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_CONTEXT | T_PROVIDE | T_DEFER | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
+ 	| T_FOR | T_ENDFOR | T_FOREACH | T_ENDFOREACH | T_DECLARE | T_ENDDECLARE | T_AS | T_TRY | T_CATCH | T_FINALLY
+ 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
+ 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
+@@ -510,6 +513,11 @@ statement:
+ 		'{' inner_statement_list '}' { $$ = $2; }
+ 	|	if_stmt { $$ = $1; }
+ 	|	alt_if_stmt { $$ = $1; }
++	|	T_DEFER expr ';' { $$ = zend_ast_create(ZEND_AST_DEFER, $2); }
++	|	T_PROVIDE expr '{' inner_statement_list '}'
++			{ $$ = zend_ast_create(ZEND_AST_PROVIDE, $2, $4); }
++	|	T_PROVIDE expr ';'
++			{ $$ = zend_ast_create(ZEND_AST_PROVIDE_STMT, $2); }
+ 	|	T_WHILE '(' expr ')' while_statement
+ 			{ $$ = zend_ast_create(ZEND_AST_WHILE, $3, $5); }
+ 	|	T_DO statement T_WHILE '(' expr ')' ';'
+@@ -816,14 +824,19 @@ optional_cpp_modifiers:
+ ;
+ 
+ parameter:
+-		optional_cpp_modifiers optional_type_without_static
++		optional_cpp_modifiers optional_context optional_type_without_static
+ 		is_reference is_variadic T_VARIABLE backup_doc_comment optional_property_hook_list
+-			{ $$ = zend_ast_create_ex(ZEND_AST_PARAM, $1 | $3 | $4, $2, $5, NULL,
+-					NULL, $6 ? zend_ast_create_zval_from_str($6) : NULL, $7); }
+-	|	optional_cpp_modifiers optional_type_without_static
++			{ $$ = zend_ast_create_ex(ZEND_AST_PARAM, $1 | $2 | $4 | $5, $3, $6, NULL,
++					NULL, $7 ? zend_ast_create_zval_from_str($7) : NULL, $8); }
++	|	optional_cpp_modifiers optional_context optional_type_without_static
+ 		is_reference is_variadic T_VARIABLE backup_doc_comment '=' expr optional_property_hook_list
+-			{ $$ = zend_ast_create_ex(ZEND_AST_PARAM, $1 | $3 | $4, $2, $5, $8,
+-					NULL, $6 ? zend_ast_create_zval_from_str($6) : NULL, $9); }
++			{ $$ = zend_ast_create_ex(ZEND_AST_PARAM, $1 | $2 | $4 | $5, $3, $6, $9,
++					NULL, $7 ? zend_ast_create_zval_from_str($7) : NULL, $10); }
++;
++
++optional_context:
++		%empty			{ $$ = 0; }
++	|	T_CONTEXT		{ $$ = ZEND_PARAM_CONTEXT; }
+ ;
+ 
+ optional_type_without_static:
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..1c81a593 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1454,6 +1454,22 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_IF);
+ }
+ 
++<ST_IN_SCRIPTING>"defer" {
++	RETURN_TOKEN_WITH_IDENT(T_DEFER);
++}
++
++/* Single-quoted patterns are case-sensitive under re2c --case-inverted (the flag
++ * the language scanner is built with), so only lowercase `context`/`provide` are
++ * keywords. `Context`/`Provide` (the common class-name casing) stay T_STRING, which
++ * keeps the very common `class Context {}` working. */
++<ST_IN_SCRIPTING>'context' {
++	RETURN_TOKEN_WITH_IDENT(T_CONTEXT);
++}
++
++<ST_IN_SCRIPTING>'provide' {
++	RETURN_TOKEN_WITH_IDENT(T_PROVIDE);
++}
++
+ <ST_IN_SCRIPTING>"elseif" {
+ 	RETURN_TOKEN_WITH_IDENT(T_ELSEIF);
+ }
+diff --git a/configure.ac b/configure.ac
+index d71eb21b..f906197e 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1745,6 +1745,8 @@ PHP_ADD_SOURCES([Zend], m4_normalize([
+     zend_constants.c
+     zend_cpuinfo.c
+     zend_default_classes.c
++    zend_defer.c
++    zend_context.c
+     zend_dtrace.c
+     zend_enum.c
+     zend_exceptions.c

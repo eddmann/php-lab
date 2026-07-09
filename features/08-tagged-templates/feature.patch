@@ -1,0 +1,356 @@
+diff --git a/Zend/tests/tagged_comprehensive.phpt b/Zend/tests/tagged_comprehensive.phpt
+new file mode 100644
+index 00000000..b43b1e19
+--- /dev/null
++++ b/Zend/tests/tagged_comprehensive.phpt
+@@ -0,0 +1,50 @@
++--TEST--
++Tagged templates — parts/values split, escaping, edge holes, non-string return
++--FILE--
++<?php
++// A debug tag: shows how the parser splits constant pieces vs interpolated values.
++function dbg(array $strings, array $values): string {
++    return json_encode($strings) . " | " . json_encode($values)
++         . " | invariant=" . (count($strings) === count($values) + 1 ? "ok" : "BROKEN");
++}
++$a = 1; $b = 2;
++echo dbg"start {$a} mid {$b} end", "\n";
++echo dbg"{$a}{$b}", "\n";        // adjacent -> ["","",""]
++echo dbg"x{$a}", "\n";           // trailing empty
++echo dbg"{$a}x", "\n";           // leading empty
++echo dbg"plain", "\n";           // no interpolation
++echo dbg"nohole", "\n";
++
++// The built-in sql demo tag: escaping and literal rendering.
++$id = 5; $name = "O'Brien"; $n = null; $pi = 3.5;
++echo sql"SELECT * FROM users WHERE id = {$id} AND name = {$name}", "\n";
++echo sql"types: {$pi}, {$n}, {true}, {false}", "\n";
++echo sql"escape: {$name} twice {$name}", "\n";
++
++// A tag can return any type, not just a string.
++function pair(array $s, array $v): array { return [$s, $v]; }
++var_dump(pair"a{$a}b");
++--EXPECT--
++["start "," mid "," end"] | [1,2] | invariant=ok
++["","",""] | [1,2] | invariant=ok
++["x",""] | [1] | invariant=ok
++["","x"] | [1] | invariant=ok
++["plain"] | [] | invariant=ok
++["nohole"] | [] | invariant=ok
++SELECT * FROM users WHERE id = 5 AND name = 'O''Brien'
++types: 3.5, NULL, {true}, {false}
++escape: 'O''Brien' twice 'O''Brien'
++array(2) {
++  [0]=>
++  array(2) {
++    [0]=>
++    string(1) "a"
++    [1]=>
++    string(1) "b"
++  }
++  [1]=>
++  array(1) {
++    [0]=>
++    int(1)
++  }
++}
+diff --git a/Zend/tests/tagged_template.phpt b/Zend/tests/tagged_template.phpt
+new file mode 100644
+index 00000000..7d9d0dd4
+--- /dev/null
++++ b/Zend/tests/tagged_template.phpt
+@@ -0,0 +1,45 @@
++--TEST--
++Tagged template strings — tag"..." calls tag(strings[], values[])
++--FILE--
++<?php
++function tag(array $strings, array $values): string {
++    return json_encode($strings) . " :: " . json_encode($values);
++}
++
++$x = 42;
++$y = "hi";
++
++// Constant pieces and interpolated values are separated.
++echo tag"a {$x} b {$y} c", "\n";
++
++// No interpolation: one string piece, no values.
++echo tag"plain", "\n";
++
++// Leading, trailing and adjacent interpolations get empty "" separators so that
++// count(strings) === count(values) + 1.
++$a = 1; $b = 2;
++echo tag"{$a}{$b}", "\n";
++echo tag"x{$a}", "\n";
++echo tag"{$a}x", "\n";
++
++// The built-in `sql` demo tag escapes values.
++$id = 5;
++$name = "O'Brien";
++echo sql"SELECT * FROM users WHERE id = {$id} AND name = {$name}", "\n";
++echo sql"vals {$id}, " . "n", "\n";   // composes with normal concatenation
++$n = null; $f = 2.5; $t = true;
++echo sql"a={$n} b={$f} c={$t}", "\n";
++
++// Ordinary strings and interpolation are unaffected.
++echo "normal {$x}", "\n";
++?>
++--EXPECT--
++["a "," b "," c"] :: [42,"hi"]
++["plain"] :: []
++["","",""] :: [1,2]
++["x",""] :: [1]
++["","x"] :: [1]
++SELECT * FROM users WHERE id = 5 AND name = 'O''Brien'
++vals 5, n
++a=NULL b=2.5 c=TRUE
++normal 42
+diff --git a/Zend/zend_ast.c b/Zend/zend_ast.c
+index 9cb3c7aa..b0cc964d 100644
+--- a/Zend/zend_ast.c
++++ b/Zend/zend_ast.c
+@@ -95,6 +95,52 @@ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_zval_from_str(zend_string *str
+ 	return zend_ast_create_zval_int(&zv, 0, CG(zend_lineno));
+ }
+ 
++/* Tagged template strings: `tag"a {$x} b"` -> tag(['a ', ' b'], [$x]).
++ * Splits the interpolated string into a constant-pieces array and a values
++ * array (JS-style: strings.count == values.count + 1, with empty "" pieces
++ * inserted where interpolations are adjacent or at the ends), then builds the
++ * call to `tag`. `parts` is either a single constant-string ZVAL node (no
++ * interpolation) or a ZEND_AST_ENCAPS_LIST. */
++static zend_ast *zend_ast_tt_elem(zend_ast *value) {
++	return zend_ast_create_ex(ZEND_AST_ARRAY_ELEM, 0, value, NULL);
++}
++
++static zend_ast *zend_ast_tt_empty(void) {
++	return zend_ast_create_zval_from_str(ZSTR_EMPTY_ALLOC());
++}
++
++ZEND_API zend_ast *zend_ast_create_tagged_template(zend_ast *name, zend_ast *parts) {
++	name->attr = ZEND_NAME_FQ;
++	zend_ast *strings = zend_ast_create_list(0, ZEND_AST_ARRAY);
++	zend_ast *values  = zend_ast_create_list(0, ZEND_AST_ARRAY);
++
++	if (parts->kind != ZEND_AST_ENCAPS_LIST) {
++		/* no interpolation: a single constant string piece */
++		strings = zend_ast_list_add(strings, zend_ast_tt_elem(parts));
++	} else {
++		zend_ast_list *list = zend_ast_get_list(parts);
++		for (uint32_t i = 0; i < list->children; i++) {
++			zend_ast *child = list->child[i];
++			list->child[i] = NULL; /* move ownership into strings/values */
++			if (child->kind == ZEND_AST_ZVAL) {
++				strings = zend_ast_list_add(strings, zend_ast_tt_elem(child));
++			} else {
++				if (zend_ast_get_list(strings)->children == zend_ast_get_list(values)->children) {
++					strings = zend_ast_list_add(strings, zend_ast_tt_elem(zend_ast_tt_empty()));
++				}
++				values = zend_ast_list_add(values, zend_ast_tt_elem(child));
++			}
++		}
++		if (zend_ast_get_list(strings)->children == zend_ast_get_list(values)->children) {
++			strings = zend_ast_list_add(strings, zend_ast_tt_elem(zend_ast_tt_empty()));
++		}
++		zend_ast_destroy(parts); /* children were moved out (NULLed) */
++	}
++
++	zend_ast *args = zend_ast_create_list(2, ZEND_AST_ARG_LIST, strings, values);
++	return zend_ast_create(ZEND_AST_CALL, name, args);
++}
++
+ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_zval_from_long(zend_long lval) {
+ 	zval zv;
+ 	ZVAL_LONG(&zv, lval);
+diff --git a/Zend/zend_ast.h b/Zend/zend_ast.h
+index fb48b187..04735aa2 100644
+--- a/Zend/zend_ast.h
++++ b/Zend/zend_ast.h
+@@ -243,6 +243,7 @@ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_zval_with_lineno(const zval *z
+ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_zval_ex(const zval *zv, zend_ast_attr attr);
+ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_zval(const zval *zv);
+ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_zval_from_str(zend_string *str);
++ZEND_API zend_ast *zend_ast_create_tagged_template(zend_ast *name, zend_ast *parts);
+ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_zval_from_long(zend_long lval);
+ 
+ ZEND_API zend_ast * ZEND_FASTCALL zend_ast_create_constant(zend_string *name, zend_ast_attr attr);
+diff --git a/Zend/zend_default_classes.c b/Zend/zend_default_classes.c
+index 7ab9b832..e2a9e5b4 100644
+--- a/Zend/zend_default_classes.c
++++ b/Zend/zend_default_classes.c
+@@ -28,6 +28,7 @@
+ #include "zend_weakrefs.h"
+ #include "zend_enum.h"
+ #include "zend_fibers.h"
++#include "zend_tagged.h"
+ 
+ ZEND_API void zend_register_default_classes(void)
+ {
+@@ -40,4 +41,5 @@ ZEND_API void zend_register_default_classes(void)
+ 	zend_register_attribute_ce();
+ 	zend_register_enum_ce();
+ 	zend_register_fiber_ce();
++	zend_register_tagged();
+ }
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..671ce002 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -1248,6 +1248,10 @@ new_non_dereferenceable:
+ expr:
+ 		variable
+ 			{ $$ = $1; }
++	|	T_STRING '"' encaps_list '"'
++			{ $$ = zend_ast_create_tagged_template($1, $3); }
++	|	T_STRING T_CONSTANT_ENCAPSED_STRING
++			{ $$ = zend_ast_create_tagged_template($1, $2); }
+ 	|	T_LIST '(' array_pair_list ')' '=' expr
+ 			{ $3->attr = ZEND_ARRAY_SYNTAX_LIST; $$ = zend_ast_create(ZEND_AST_ASSIGN, $3, $6); }
+ 	|	'[' array_pair_list ']' '=' expr
+diff --git a/Zend/zend_tagged.c b/Zend/zend_tagged.c
+new file mode 100644
+index 00000000..6e08987c
+--- /dev/null
++++ b/Zend/zend_tagged.c
+@@ -0,0 +1,66 @@
++#include "zend.h"
++#include "zend_API.h"
++#include "zend_smart_str.h"
++#include "zend_tagged.h"
++#include "zend_tagged_arginfo.h"
++
++static void sql_append_literal(smart_str *buf, zval *v)
++{
++	ZVAL_DEREF(v);
++	switch (Z_TYPE_P(v)) {
++		case IS_NULL:  smart_str_appends(buf, "NULL"); return;
++		case IS_TRUE:  smart_str_appends(buf, "TRUE"); return;
++		case IS_FALSE: smart_str_appends(buf, "FALSE"); return;
++		case IS_LONG:  smart_str_append_long(buf, Z_LVAL_P(v)); return;
++		case IS_DOUBLE: {
++			zend_string *s = zend_strpprintf(0, "%.14G", Z_DVAL_P(v));
++			smart_str_append(buf, s);
++			zend_string_release(s);
++			return;
++		}
++		default: break;
++	}
++	/* strings (and anything else, cast to string): single-quote, escape ' as '' */
++	zend_string *s = zval_get_string(v);
++	smart_str_appendc(buf, '\'');
++	const char *p = ZSTR_VAL(s), *end = p + ZSTR_LEN(s);
++	for (; p < end; p++) {
++		if (*p == '\'') {
++			smart_str_appendc(buf, '\'');
++		}
++		smart_str_appendc(buf, *p);
++	}
++	smart_str_appendc(buf, '\'');
++	zend_string_release(s);
++}
++
++ZEND_FUNCTION(sql)
++{
++	zval *strings, *values;
++	ZEND_PARSE_PARAMETERS_START(2, 2)
++		Z_PARAM_ARRAY(strings)
++		Z_PARAM_ARRAY(values)
++	ZEND_PARSE_PARAMETERS_END();
++
++	smart_str buf = {0};
++	uint32_t ns = zend_hash_num_elements(Z_ARRVAL_P(strings));
++	for (uint32_t i = 0; i < ns; i++) {
++		zval *s = zend_hash_index_find(Z_ARRVAL_P(strings), i);
++		if (s) {
++			zend_string *ss = zval_get_string(s);
++			smart_str_append(&buf, ss);
++			zend_string_release(ss);
++		}
++		zval *v = zend_hash_index_find(Z_ARRVAL_P(values), i);
++		if (v) {
++			sql_append_literal(&buf, v);
++		}
++	}
++	smart_str_0(&buf);
++	RETURN_STR(smart_str_extract(&buf));
++}
++
++void zend_register_tagged(void)
++{
++	zend_register_functions(NULL, ext_functions, NULL, MODULE_PERSISTENT);
++}
+diff --git a/Zend/zend_tagged.h b/Zend/zend_tagged.h
+new file mode 100644
+index 00000000..41e1aa59
+--- /dev/null
++++ b/Zend/zend_tagged.h
+@@ -0,0 +1,20 @@
++/*
++   +----------------------------------------------------------------------+
++   | Tagged template strings — the built-in `sql` demo tag.               |
++   |                                                                      |
++   | The `tag"... {$v} ..."` syntax is pure parser sugar that lowers to   |
++   | `tag(strings[], values[])`. This file provides one demo handler,     |
++   | `sql`, that interleaves the parts with SQL-escaped values.           |
++   +----------------------------------------------------------------------+
++*/
++
++#ifndef ZEND_TAGGED_H
++#define ZEND_TAGGED_H
++
++#include "zend.h"
++
++BEGIN_EXTERN_C()
++void zend_register_tagged(void);
++END_EXTERN_C()
++
++#endif /* ZEND_TAGGED_H */
+diff --git a/Zend/zend_tagged.stub.php b/Zend/zend_tagged.stub.php
+new file mode 100644
+index 00000000..decd67e0
+--- /dev/null
++++ b/Zend/zend_tagged.stub.php
+@@ -0,0 +1,11 @@
++<?php
++
++/** @generate-class-entries */
++
++/**
++ * A demo tagged-template handler: `sql"... {$v} ..."` calls sql(parts, values)
++ * and interleaves the constant parts with SQL-escaped values (strings single-
++ * quoted with '' escaping, numbers inline, null -> NULL). Shows the tagged-
++ * template mechanism — not a substitute for real parameterised queries.
++ */
++function sql(array $strings, array $values): string {}
+diff --git a/Zend/zend_tagged_arginfo.h b/Zend/zend_tagged_arginfo.h
+new file mode 100644
+index 00000000..6b81d15c
+--- /dev/null
++++ b/Zend/zend_tagged_arginfo.h
+@@ -0,0 +1,14 @@
++/* This is a generated file, edit the .stub.php file instead.
++ * Stub hash: 0883c79683519a3fa18343bea26cddf1eab55e57 */
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_sql, 0, 2, IS_STRING, 0)
++	ZEND_ARG_TYPE_INFO(0, strings, IS_ARRAY, 0)
++	ZEND_ARG_TYPE_INFO(0, values, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_FUNCTION(sql);
++
++static const zend_function_entry ext_functions[] = {
++	ZEND_FE(sql, arginfo_sql)
++	ZEND_FE_END
++};
+diff --git a/configure.ac b/configure.ac
+index d71eb21b..655858dd 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1745,6 +1745,7 @@ PHP_ADD_SOURCES([Zend], m4_normalize([
+     zend_constants.c
+     zend_cpuinfo.c
+     zend_default_classes.c
++    zend_tagged.c
+     zend_dtrace.c
+     zend_enum.c
+     zend_exceptions.c

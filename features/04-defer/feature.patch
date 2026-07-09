@@ -1,0 +1,545 @@
+diff --git a/Zend/tests/defer.phpt b/Zend/tests/defer.phpt
+new file mode 100644
+index 00000000..caeb295a
+--- /dev/null
++++ b/Zend/tests/defer.phpt
+@@ -0,0 +1,102 @@
++--TEST--
++defer — Go-style scope-exit cleanup (LIFO, on return and on exception)
++--FILE--
++<?php
++// LIFO on normal return: deferred calls run after the body, last-scheduled first.
++function lifo() {
++    defer printf("a\n");
++    defer printf("b\n");
++    echo "body\n";
++}
++lifo();
++
++// Runs during exception unwind too.
++function boom() {
++    defer printf("cleanup\n");
++    throw new RuntimeException("boom");
++}
++try {
++    boom();
++} catch (Throwable $e) {
++    echo "caught: ", $e->getMessage(), "\n";
++}
++
++// A defer inside a loop schedules one call per iteration; all run LIFO at exit.
++function loop() {
++    for ($i = 0; $i < 3; $i++) {
++        defer printf("[%d]", $i);
++    }
++    echo "loop-body\n";
++}
++loop();
++echo "\n";
++
++// Go-faithful capture: the arguments are evaluated at the defer point, not at exit.
++function capture() {
++    $x = 1;
++    defer printf("x=%d\n", $x);
++    $x = 2;
++}
++capture();
++
++// The receiver of a method call is likewise captured at the defer point.
++class Logger {
++    public function __construct(public string $tag) {}
++    public function flush() { printf("flush %s\n", $this->tag); }
++}
++function receiver() {
++    $log = new Logger("first");
++    defer $log->flush();
++    $log = new Logger("second");
++}
++receiver();
++
++// Static calls work too.
++class Greeter {
++    public static function bye($name) { printf("bye %s\n", $name); }
++}
++function static_call() {
++    defer Greeter::bye("x");
++    echo "work\n";
++}
++static_call();
++
++// Spread arguments are captured (flattened) at the defer point.
++function spread() {
++    $a = [1, 2, 3];
++    defer printf("%d-%d-%d\n", ...$a);
++    $a = [9];
++    echo "spread-body\n";
++}
++spread();
++
++// Deferred calls do not alter the return value.
++function ret() {
++    defer printf("after\n");
++    return 42;
++}
++var_dump(ret());
++
++// `defer` is only semi-reserved: still usable as a method name.
++class HasMethod {
++    public function defer() { return "method-ok\n"; }
++}
++echo (new HasMethod)->defer();
++?>
++--EXPECT--
++body
++b
++a
++cleanup
++caught: boom
++loop-body
++[2][1][0]
++x=1
++flush first
++work
++bye x
++spread-body
++1-2-3
++after
++int(42)
++method-ok
+diff --git a/Zend/tests/defer_comprehensive.phpt b/Zend/tests/defer_comprehensive.phpt
+new file mode 100644
+index 00000000..ef2505b0
+--- /dev/null
++++ b/Zend/tests/defer_comprehensive.phpt
+@@ -0,0 +1,47 @@
++--TEST--
++defer — LIFO, exceptions, capture, spread, static, loop, semi-reserved
++--FILE--
++<?php
++// LIFO on normal return
++function lifo() { defer printf("a\n"); defer printf("b\n"); defer printf("c\n"); print "body\n"; }
++lifo();
++// runs on exception unwind
++function boom() { defer printf("cleanup\n"); throw new RuntimeException("x"); }
++try { boom(); } catch (Throwable $e) { print "caught: {$e->getMessage()}\n"; }
++// argument capture at defer point (Go-faithful)
++function capture() { $x = 1; defer printf("captured %d\n", $x); $x = 2; }
++capture();
++// receiver capture
++class Res { public function __construct(public string $id) {} public function close() { print "close {$this->id}\n"; } }
++function res() { $r = new Res("A"); defer $r->close(); $r = new Res("B"); }
++res();  // closes A
++// spread args
++function spread() { $args = [1,2,3]; defer printf("%d-%d-%d\n", ...$args); }
++spread();
++// static call
++class S { public static function log(string $m) { print "log $m\n"; } }
++function st() { defer S::log("done"); print "work\n"; }
++st();
++// defer in a loop: each iteration schedules, all run at function exit LIFO
++function loop() { for ($i = 0; $i < 3; $i++) { defer printf("d%d\n", $i); } print "loopbody\n"; }
++loop();
++// semi-reserved name
++class D { function defer() { return "ok"; } }
++echo (new D)->defer(), "\n";
++--EXPECT--
++body
++c
++b
++a
++cleanup
++caught: x
++captured 1
++close A
++1-2-3
++work
++log done
++loopbody
++d2
++d1
++d0
++ok
+diff --git a/Zend/zend_ast.c b/Zend/zend_ast.c
+index 9cb3c7aa..01f873f5 100644
+--- a/Zend/zend_ast.c
++++ b/Zend/zend_ast.c
+@@ -2394,6 +2394,8 @@ simple_list:
+ 			APPEND_STR("__HALT_COMPILER()");
+ 		case ZEND_AST_ECHO:
+ 			APPEND_NODE_1("echo");
++		case ZEND_AST_DEFER:
++			APPEND_NODE_1("defer");
+ 		case ZEND_AST_THROW:
+ 			APPEND_NODE_1("throw");
+ 		case ZEND_AST_GOTO:
+diff --git a/Zend/zend_ast.h b/Zend/zend_ast.h
+index fb48b187..30df4526 100644
+--- a/Zend/zend_ast.h
++++ b/Zend/zend_ast.h
+@@ -99,6 +99,7 @@ enum _zend_ast_kind {
+ 	ZEND_AST_YIELD_FROM,
+ 	ZEND_AST_CLASS_NAME,
+ 
++	ZEND_AST_DEFER,
+ 	ZEND_AST_GLOBAL,
+ 	ZEND_AST_UNSET,
+ 	ZEND_AST_RETURN,
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..db921447 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -6729,6 +6729,94 @@ static void zend_compile_match(znode *result, zend_ast *ast)
+ 	efree(jmp_end_opnums);
+ }
+ 
++/* --- `defer CALL;` (Go-style deferred call) --- */
++
++/* A ZEND_AST_VAR for the hidden per-frame DeferScope CV (leading digit -> not
++ * writable from userland, so it can never collide with a user variable). */
++static zend_ast *defer_hidden_var(void) /* {{{ */
++{
++	return zend_ast_create(ZEND_AST_VAR,
++		zend_ast_create_zval_from_str(zend_string_init("0defer", sizeof("0defer") - 1, 0)));
++}
++/* }}} */
++
++/* Desugar `defer callee(args);` to:
++ *   $<hidden> ??= new DeferScope();
++ *   $<hidden>->push(callee(...), [args]);
++ * The first-class-callable `callee(...)` captures the callee/receiver now and the
++ * `[args]` array captures the arguments now (Go-faithful); the DeferScope runs the
++ * collected calls LIFO when the frame is torn down (return or exception). */
++static void zend_compile_defer(zend_ast *ast) /* {{{ */
++{
++	zend_ast *call = ast->child[0];
++	uint32_t args_idx;
++
++	switch (call->kind) {
++		case ZEND_AST_CALL:
++			args_idx = 1;
++			break;
++		case ZEND_AST_METHOD_CALL:
++		case ZEND_AST_NULLSAFE_METHOD_CALL:
++		case ZEND_AST_STATIC_CALL:
++			args_idx = 2;
++			break;
++		default:
++			zend_error_noreturn(E_COMPILE_ERROR, "defer requires a function or method call");
++			return;
++	}
++
++	zend_ast_list *arglist = zend_ast_get_list(call->child[args_idx]);
++
++	/* [args...] — capture each argument now (positional + spread; named args
++	 * are not supported in v1). A spread `...$x` is carried over verbatim as an
++	 * ZEND_AST_UNPACK element of the array literal, so its elements are flattened
++	 * into the captured array at the defer point (Go-faithful). */
++	zend_ast *args_array = zend_ast_create_list(0, ZEND_AST_ARRAY);
++	for (uint32_t i = 0; i < arglist->children; i++) {
++		zend_ast *arg = arglist->child[i];
++		if (arg->kind == ZEND_AST_NAMED_ARG) {
++			zend_error_noreturn(E_COMPILE_ERROR,
++				"defer does not support named arguments");
++		}
++		arglist->child[i] = NULL; /* detach: reused in args_array */
++		if (arg->kind == ZEND_AST_UNPACK) {
++			args_array = zend_ast_list_add(args_array, arg);
++		} else {
++			args_array = zend_ast_list_add(args_array,
++				zend_ast_create_ex(ZEND_AST_ARRAY_ELEM, 0, arg, NULL));
++		}
++	}
++
++	/* Turn the call into a first-class callable `callee(...)` (captures callee now). */
++	call->child[args_idx] = zend_ast_create(ZEND_AST_CALLABLE_CONVERT);
++	ast->child[0] = NULL; /* detach the call; now owned by push_call below */
++	zend_ast *callee_fcc = call;
++
++	/* $<hidden> ??= new DeferScope(); */
++	zend_ast *cls = zend_ast_create_zval_from_str(
++		zend_string_init("DeferScope", sizeof("DeferScope") - 1, 0));
++	cls->attr = ZEND_NAME_FQ;
++	zend_ast *new_scope = zend_ast_create(ZEND_AST_NEW, cls,
++		zend_ast_create_list(0, ZEND_AST_ARG_LIST));
++	zend_ast *coalesce = zend_ast_create(ZEND_AST_ASSIGN_COALESCE,
++		defer_hidden_var(), new_scope);
++	znode r1;
++	zend_compile_expr(&r1, coalesce);
++	zend_do_free(&r1);
++	zend_ast_destroy(coalesce);
++
++	/* $<hidden>->push(callee(...), [args]); */
++	zend_ast *push_call = zend_ast_create(ZEND_AST_METHOD_CALL,
++		defer_hidden_var(),
++		zend_ast_create_zval_from_str(zend_string_init("push", sizeof("push") - 1, 0)),
++		zend_ast_create_list(2, ZEND_AST_ARG_LIST, callee_fcc, args_array));
++	znode r2;
++	zend_compile_expr(&r2, push_call);
++	zend_do_free(&r2);
++	zend_ast_destroy(push_call);
++}
++/* }}} */
++
+ static void zend_compile_try(zend_ast *ast) /* {{{ */
+ {
+ 	zend_ast *try_ast = ast->child[0];
+@@ -11708,6 +11796,9 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
+ 		case ZEND_AST_RETURN:
+ 			zend_compile_return(ast);
+ 			break;
++		case ZEND_AST_DEFER:
++			zend_compile_defer(ast);
++			break;
+ 		case ZEND_AST_ECHO:
+ 			zend_compile_echo(ast);
+ 			break;
+diff --git a/Zend/zend_default_classes.c b/Zend/zend_default_classes.c
+index 7ab9b832..c5404051 100644
+--- a/Zend/zend_default_classes.c
++++ b/Zend/zend_default_classes.c
+@@ -28,6 +28,7 @@
+ #include "zend_weakrefs.h"
+ #include "zend_enum.h"
+ #include "zend_fibers.h"
++#include "zend_defer.h"
+ 
+ ZEND_API void zend_register_default_classes(void)
+ {
+@@ -40,4 +41,5 @@ ZEND_API void zend_register_default_classes(void)
+ 	zend_register_attribute_ce();
+ 	zend_register_enum_ce();
+ 	zend_register_fiber_ce();
++	zend_register_defer();
+ }
+diff --git a/Zend/zend_defer.c b/Zend/zend_defer.c
+new file mode 100644
+index 00000000..5e103bd8
+--- /dev/null
++++ b/Zend/zend_defer.c
+@@ -0,0 +1,81 @@
++#include "zend.h"
++#include "zend_API.h"
++#include "zend_exceptions.h"
++#include "zend_defer.h"
++#include "zend_defer_arginfo.h"
++
++ZEND_API zend_class_entry *zend_ce_defer_scope;
++
++ZEND_METHOD(DeferScope, push)
++{
++	zval *fn, *args;
++	ZEND_PARSE_PARAMETERS_START(2, 2)
++		Z_PARAM_ZVAL(fn)
++		Z_PARAM_ZVAL(args)
++	ZEND_PARSE_PARAMETERS_END();
++
++	zval pair;
++	array_init_size(&pair, 2);
++	Z_TRY_ADDREF_P(fn);
++	add_next_index_zval(&pair, fn);
++	Z_TRY_ADDREF_P(args);
++	add_next_index_zval(&pair, args);
++
++	zval *entries = OBJ_PROP_NUM(Z_OBJ_P(ZEND_THIS), 0);
++	ZVAL_DEREF(entries);
++	/* The declared default `[]` is the engine's *immutable* empty array, which
++	 * SEPARATE_ARRAY won't clone (its refcount is 1). Install a fresh, owned
++	 * array the first time we push; thereafter separate as usual. */
++	HashTable *ht;
++	if (!Z_REFCOUNTED_P(entries)) {
++		ht = zend_new_array(8);
++		ZVAL_ARR(entries, ht);
++	} else {
++		SEPARATE_ARRAY(entries);
++		ht = Z_ARR_P(entries);
++	}
++	zend_hash_next_index_insert(ht, &pair);
++}
++
++ZEND_METHOD(DeferScope, __destruct)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++
++	zval *entries = OBJ_PROP_NUM(Z_OBJ_P(ZEND_THIS), 0);
++	ZVAL_DEREF(entries);
++	if (Z_TYPE_P(entries) != IS_ARRAY) {
++		return;
++	}
++
++	zval *pair;
++	ZEND_HASH_REVERSE_FOREACH_VAL(Z_ARRVAL_P(entries), pair) {
++		ZVAL_DEREF(pair);
++		zval *fn = zend_hash_index_find(Z_ARRVAL_P(pair), 0);
++		zval *args = zend_hash_index_find(Z_ARRVAL_P(pair), 1);
++		if (!fn || !args) {
++			continue;
++		}
++		zend_fcall_info fci;
++		zend_fcall_info_cache fcc;
++		char *error = NULL;
++		if (zend_fcall_info_init(fn, 0, &fci, &fcc, NULL, &error) == SUCCESS) {
++			zval ret;
++			ZVAL_UNDEF(&ret);
++			fci.retval = &ret;
++			zend_fcall_info_args(&fci, args);
++			zend_call_function(&fci, &fcc);
++			zend_fcall_info_args_clear(&fci, 1);
++			zval_ptr_dtor(&ret);
++		} else if (error) {
++			efree(error);
++		}
++		if (EG(exception)) {
++			break; /* stop running further defers once one throws */
++		}
++	} ZEND_HASH_FOREACH_END();
++}
++
++void zend_register_defer(void)
++{
++	zend_ce_defer_scope = register_class_DeferScope();
++}
+diff --git a/Zend/zend_defer.h b/Zend/zend_defer.h
+new file mode 100644
+index 00000000..eb97a95c
+--- /dev/null
++++ b/Zend/zend_defer.h
+@@ -0,0 +1,21 @@
++/*
++   +----------------------------------------------------------------------+
++   | DeferScope — runtime support for the `defer` statement.              |
++   |                                                                      |
++   | A per-frame collector: the compiler lowers each `defer CALL;` to     |
++   | `$<hidden> ??= new DeferScope(); $<hidden>->push(callee(...), [args])`|
++   | and the destructor replays the collected calls LIFO on scope exit.   |
++   +----------------------------------------------------------------------+
++*/
++
++#ifndef ZEND_DEFER_H
++#define ZEND_DEFER_H
++
++#include "zend.h"
++
++BEGIN_EXTERN_C()
++extern ZEND_API zend_class_entry *zend_ce_defer_scope;
++void zend_register_defer(void);
++END_EXTERN_C()
++
++#endif /* ZEND_DEFER_H */
+diff --git a/Zend/zend_defer.stub.php b/Zend/zend_defer.stub.php
+new file mode 100644
+index 00000000..21a379ef
+--- /dev/null
++++ b/Zend/zend_defer.stub.php
+@@ -0,0 +1,15 @@
++<?php
++
++/** @generate-class-entries */
++
++/**
++ * Per-frame collector for `defer` statements (internal). The compiler emits
++ * `$<hidden> ??= new DeferScope(); $<hidden>->push(callee(...), [args]);` and the
++ * destructor runs the collected calls LIFO when the frame is torn down.
++ */
++final class DeferScope
++{
++    private array $entries = [];
++    public function push(callable $fn, array $args): void {}
++    public function __destruct() {}
++}
+diff --git a/Zend/zend_defer_arginfo.h b/Zend/zend_defer_arginfo.h
+new file mode 100644
+index 00000000..a85465ea
+--- /dev/null
++++ b/Zend/zend_defer_arginfo.h
+@@ -0,0 +1,35 @@
++/* This is a generated file, edit the .stub.php file instead.
++ * Stub hash: 6ecc478aedc186cf4d459c1daa826b1fdc6112cd */
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_DeferScope_push, 0, 2, IS_VOID, 0)
++	ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
++	ZEND_ARG_TYPE_INFO(0, args, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_INFO_EX(arginfo_class_DeferScope___destruct, 0, 0, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_METHOD(DeferScope, push);
++ZEND_METHOD(DeferScope, __destruct);
++
++static const zend_function_entry class_DeferScope_methods[] = {
++	ZEND_ME(DeferScope, push, arginfo_class_DeferScope_push, ZEND_ACC_PUBLIC)
++	ZEND_ME(DeferScope, __destruct, arginfo_class_DeferScope___destruct, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static zend_class_entry *register_class_DeferScope(void)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "DeferScope", class_DeferScope_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
++
++	zval property_entries_default_value;
++	ZVAL_EMPTY_ARRAY(&property_entries_default_value);
++	zend_string *property_entries_name = zend_string_init("entries", sizeof("entries") - 1, 1);
++	zend_declare_typed_property(class_entry, property_entries_name, &property_entries_default_value, ZEND_ACC_PRIVATE, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_ARRAY));
++	zend_string_release(property_entries_name);
++
++	return class_entry;
++}
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..bdbe767b 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -116,6 +116,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token <ident> T_CLONE         "'clone'"
+ %token <ident> T_EXIT          "'exit'"
+ %token <ident> T_IF            "'if'"
++%token <ident> T_DEFER         "'defer'"
+ %token <ident> T_ELSEIF        "'elseif'"
+ %token <ident> T_ELSE          "'else'"
+ %token <ident> T_ENDIF         "'endif'"
+@@ -306,7 +307,7 @@ start:
+ 
+ reserved_non_modifiers:
+ 	  T_INCLUDE | T_INCLUDE_ONCE | T_EVAL | T_REQUIRE | T_REQUIRE_ONCE | T_LOGICAL_OR | T_LOGICAL_XOR | T_LOGICAL_AND
+-	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
++	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_DEFER | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
+ 	| T_FOR | T_ENDFOR | T_FOREACH | T_ENDFOREACH | T_DECLARE | T_ENDDECLARE | T_AS | T_TRY | T_CATCH | T_FINALLY
+ 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
+ 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
+@@ -510,6 +511,7 @@ statement:
+ 		'{' inner_statement_list '}' { $$ = $2; }
+ 	|	if_stmt { $$ = $1; }
+ 	|	alt_if_stmt { $$ = $1; }
++	|	T_DEFER expr ';' { $$ = zend_ast_create(ZEND_AST_DEFER, $2); }
+ 	|	T_WHILE '(' expr ')' while_statement
+ 			{ $$ = zend_ast_create(ZEND_AST_WHILE, $3, $5); }
+ 	|	T_DO statement T_WHILE '(' expr ')' ';'
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..afde60dd 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1454,6 +1454,10 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_IF);
+ }
+ 
++<ST_IN_SCRIPTING>"defer" {
++	RETURN_TOKEN_WITH_IDENT(T_DEFER);
++}
++
+ <ST_IN_SCRIPTING>"elseif" {
+ 	RETURN_TOKEN_WITH_IDENT(T_ELSEIF);
+ }
+diff --git a/configure.ac b/configure.ac
+index d71eb21b..e175698e 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1745,6 +1745,7 @@ PHP_ADD_SOURCES([Zend], m4_normalize([
+     zend_constants.c
+     zend_cpuinfo.c
+     zend_default_classes.c
++    zend_defer.c
+     zend_dtrace.c
+     zend_enum.c
+     zend_exceptions.c

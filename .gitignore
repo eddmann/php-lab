@@ -1,0 +1,21 @@
+# Cloned/derived PHP sources — never committed
+/php-src/
+/wasm/.php-src-pristine/
+/wasm/.build-*/
+
+# Build artifacts
+*.o
+*.lo
+*.la
+
+# Editor / OS / tooling
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+.claude/settings.local.json
+
+# Environment
+.env
+.env.*

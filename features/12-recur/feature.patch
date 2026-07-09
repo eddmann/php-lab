@@ -1,0 +1,430 @@
+diff --git a/Zend/tests/recur.phpt b/Zend/tests/recur.phpt
+new file mode 100644
+index 00000000..0ac73612
+--- /dev/null
++++ b/Zend/tests/recur.phpt
+@@ -0,0 +1,67 @@
++--TEST--
++recur — explicit tail recursion: constant stack, swap safety, methods, closures, loops
++--FILE--
++<?php
++// Deep explicit recursion: would exhaust memory as ordinary recursion.
++function sum_to(int $n, int $acc) {
++    if ($n === 0) return $acc;
++    return recur($n - 1, $acc + $n);
++}
++var_dump(sum_to(200000, 0));
++
++// Bare-statement form.
++function count_down(int $n) {
++    if ($n === 0) { echo "liftoff\n"; return; }
++    recur($n - 1);
++}
++count_down(100000);
++
++// Arguments are evaluated before rebinding: swaps read pre-rebind values.
++function swap_n(int $a, int $b, int $n) {
++    if ($n === 0) return "$a,$b";
++    return recur($b, $a, $n - 1);
++}
++echo swap_n(1, 2, 5), "\n";
++echo swap_n(1, 2, 4), "\n";
++
++// Methods and closures may recur explicitly.
++class Counter {
++    public function sum(int $n, int $acc): int {
++        if ($n === 0) return $acc;
++        return recur($n - 1, $acc + $n);
++    }
++}
++echo (new Counter)->sum(100000, 0), "\n";
++
++$sum = function (int $n, int $acc) {
++    if ($n === 0) return $acc;
++    return recur($n - 1, $acc + $n);
++};
++echo $sum(100000, 0), "\n";
++
++// recur out of a foreach frees the loop iterator each round.
++function scan(array $xs, int $depth = 0) {
++    foreach ($xs as $x) {
++        if ($x === 99) return "found";
++    }
++    if ($depth >= 50000) return "done@$depth";
++    return recur($xs, $depth + 1);
++}
++echo scan([1, 2, 3]), "\n";
++
++// Default-parameter functions: recur passes a value for every declared param.
++function step(int $n, int $acc = 0) {
++    if ($n === 0) return $acc;
++    return recur($n - 1, $acc + 1);
++}
++echo step(100000), "\n";
++?>
++--EXPECT--
++int(20000100000)
++liftoff
++2,1
++1,2
++5000050000
++5000050000
++done@50000
++100000
+diff --git a/Zend/tests/recur_error_argcount.phpt b/Zend/tests/recur_error_argcount.phpt
+new file mode 100644
+index 00000000..c17348ad
+--- /dev/null
++++ b/Zend/tests/recur_error_argcount.phpt
+@@ -0,0 +1,8 @@
++--TEST--
++recur with wrong arity is a compile error
++--FILE--
++<?php
++function f(int $a, int $b) { return recur(1); }
++?>
++--EXPECTF--
++Fatal error: recur expects exactly 2 arguments (one per declared parameter), 1 given in %s on line %d
+diff --git a/Zend/tests/recur_error_position.phpt b/Zend/tests/recur_error_position.phpt
+new file mode 100644
+index 00000000..6137d214
+--- /dev/null
++++ b/Zend/tests/recur_error_position.phpt
+@@ -0,0 +1,8 @@
++--TEST--
++recur outside tail position is a compile error
++--FILE--
++<?php
++function f(int $n) { $x = recur($n); }
++?>
++--EXPECTF--
++Fatal error: recur is only supported in tail position: as a statement `recur(...);` or as `return recur(...);` in %s on line %d
+diff --git a/Zend/tests/recur_error_toplevel.phpt b/Zend/tests/recur_error_toplevel.phpt
+new file mode 100644
+index 00000000..64e826c5
+--- /dev/null
++++ b/Zend/tests/recur_error_toplevel.phpt
+@@ -0,0 +1,8 @@
++--TEST--
++recur outside a function is a compile error
++--FILE--
++<?php
++recur(1);
++?>
++--EXPECTF--
++Fatal error: recur can only be used inside a function in %s on line %d
+diff --git a/Zend/tests/recur_error_try.phpt b/Zend/tests/recur_error_try.phpt
+new file mode 100644
+index 00000000..92170686
+--- /dev/null
++++ b/Zend/tests/recur_error_try.phpt
+@@ -0,0 +1,8 @@
++--TEST--
++recur inside try/catch is a compile error
++--FILE--
++<?php
++function f(int $n) { try { return recur($n); } catch (Exception $e) {} }
++?>
++--EXPECTF--
++Fatal error: recur is not supported inside try/catch/finally in %s on line %d
+diff --git a/Zend/tests/recur_error_variadic.phpt b/Zend/tests/recur_error_variadic.phpt
+new file mode 100644
+index 00000000..02cc8f00
+--- /dev/null
++++ b/Zend/tests/recur_error_variadic.phpt
+@@ -0,0 +1,8 @@
++--TEST--
++recur in a variadic function is a compile error
++--FILE--
++<?php
++function f(int ...$n) { return recur(1); }
++?>
++--EXPECTF--
++Fatal error: recur cannot be used in a variadic function in %s on line %d
+diff --git a/Zend/tests/recur_tco.phpt b/Zend/tests/recur_tco.phpt
+new file mode 100644
+index 00000000..f5f375f3
+--- /dev/null
++++ b/Zend/tests/recur_tco.phpt
+@@ -0,0 +1,57 @@
++--TEST--
++Automatic self-TCO: plain tail self-calls are eliminated; dispatch and semantics preserved
++--FILE--
++<?php
++// `return f(...)` inside plain function f — no keyword, constant stack.
++function fact_iter(int $n, int $acc) {
++    if ($n <= 1) return $acc;
++    return fact_iter($n - 1, $acc + $n);
++}
++var_dump(fact_iter(200000, 0));
++
++// Non-tail recursion is untouched (result feeds an addition).
++function fib(int $n): int {
++    return $n < 2 ? $n : fib($n - 1) + fib($n - 2);
++}
++echo fib(20), "\n";
++
++// Methods never auto-TCO: subclass override keeps dynamic dispatch.
++class A {
++    public function f(int $n): string {
++        if ($n === 0) return "A";
++        return $this->f($n - 1);
++    }
++}
++class B extends A {
++    public function f(int $n): string { return "B"; }
++}
++echo (new B)->f(3), "\n";
++echo (new A)->f(3), "\n";
++
++// Arg-count mismatch (defaults in play) falls back to an ordinary call.
++function g(int $n, int $acc = 0) {
++    if ($n === 0) return $acc;
++    return g($n - 1);              // 1 arg for 2 params -> normal call
++}
++echo g(5), "\n";
++
++// Mutual recursion is ordinary calls (only SELF tail calls are eliminated).
++function is_even(int $n): bool { return $n === 0 ? true : is_odd($n - 1); }
++function is_odd(int $n): bool  { return $n === 0 ? false : is_even($n - 1); }
++var_dump(is_even(10000));
++
++// Case-insensitive function names still match.
++function upper(int $n, int $acc) {
++    if ($n === 0) return $acc;
++    return UPPER($n - 1, $acc + 1);
++}
++echo upper(200000, 0), "\n";
++?>
++--EXPECT--
++int(20000099999)
++6765
++B
++A
++0
++bool(true)
++200000
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..b26dbf4f 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -100,6 +100,8 @@ static zend_op *zend_compile_var(znode *result, zend_ast *ast, uint32_t type, bo
+ static zend_op *zend_delayed_compile_var(znode *result, zend_ast *ast, uint32_t type, bool by_ref);
+ static void zend_compile_expr(znode *result, zend_ast *ast);
+ static void zend_compile_stmt(zend_ast *ast);
++static bool zend_ast_is_recur_call(zend_ast *ast);
++static void zend_compile_recur(zend_ast *call_ast);
+ static void zend_compile_assign(znode *result, zend_ast *ast);
+ 
+ #ifdef ZEND_CHECK_STACK_LIMIT
+@@ -5157,6 +5159,10 @@ static bool zend_compile_parent_property_hook_call(znode *result, zend_ast *ast,
+ 
+ static void zend_compile_call(znode *result, zend_ast *ast, uint32_t type) /* {{{ */
+ {
++	if (zend_ast_is_recur_call(ast)) {
++		zend_error_noreturn(E_COMPILE_ERROR,
++			"recur is only supported in tail position: as a statement `recur(...);` or as `return recur(...);`");
++	}
+ 	zend_ast *name_ast = ast->child[0];
+ 	zend_ast *args_ast = ast->child[1];
+ 	bool is_callable_convert = args_ast->kind == ZEND_AST_CALLABLE_CONVERT;
+@@ -5688,6 +5694,171 @@ static bool zend_has_finally(void) /* {{{ */
+ }
+ /* }}} */
+ 
++/* ---- `recur` — explicit tail recursion + automatic self-TCO ------------- */
++
++/* Is this AST an unqualified call to recur(...)? */
++static bool zend_ast_is_recur_call(zend_ast *ast) /* {{{ */
++{
++	if (!ast || ast->kind != ZEND_AST_CALL) {
++		return false;
++	}
++	zend_ast *name_ast = ast->child[0];
++	if (name_ast->kind != ZEND_AST_ZVAL
++	 || Z_TYPE_P(zend_ast_get_zval(name_ast)) != IS_STRING
++	 || name_ast->attr != ZEND_NAME_NOT_FQ) {
++		return false;
++	}
++	return zend_string_equals_literal_ci(zend_ast_get_str(name_ast), "recur");
++}
++/* }}} */
++
++/* Emit the rebind-and-jump for a validated recur / self tail call: evaluate
++ * ALL argument expressions into temporaries first (so recur($b, $a) reads the
++ * pre-rebind values), assign them to the parameter CVs, free enclosing loop
++ * temporaries (exactly as goto does), and jump back to the first opline after
++ * the RECVs. Constant stack — this IS tail-call elimination. */
++static void zend_emit_recur_jump(zend_ast_list *args) /* {{{ */
++{
++	zend_op_array *op_array = CG(active_op_array);
++	uint32_t num_params = op_array->num_args;
++	znode *tmps = safe_emalloc(num_params ? num_params : 1, sizeof(znode), 0);
++	uint32_t i;
++
++	for (i = 0; i < num_params; i++) {
++		znode arg_node;
++		zend_compile_expr(&arg_node, args->child[i]);
++		zend_emit_op_tmp(&tmps[i], ZEND_QM_ASSIGN, &arg_node, NULL);
++	}
++	for (i = 0; i < num_params; i++) {
++		zend_string *name = op_array->arg_info[i].name;
++		zend_ast *var_ast = zend_ast_create(ZEND_AST_VAR,
++			zend_ast_create_zval_from_str(zend_string_copy(name)));
++		zend_emit_assign_znode(var_ast, &tmps[i]);
++	}
++	efree(tmps);
++
++	zend_handle_loops_and_finally(NULL);
++
++	uint32_t target = 0;
++	while (target < op_array->last
++	 && (op_array->opcodes[target].opcode == ZEND_RECV
++	  || op_array->opcodes[target].opcode == ZEND_RECV_INIT)) {
++		target++;
++	}
++	zend_emit_jump(target);
++}
++/* }}} */
++
++/* Shared validation. When silent, any problem returns false so the caller
++ * falls back to an ordinary call; otherwise it raises the compile error. */
++static bool zend_validate_recur(zend_ast_list *args, bool silent) /* {{{ */
++{
++	zend_op_array *op_array = CG(active_op_array);
++	uint32_t i;
++
++#define ZEND_RECUR_FAIL(...) do { \
++		if (silent) { return false; } \
++		zend_error_noreturn(E_COMPILE_ERROR, __VA_ARGS__); \
++	} while (0)
++
++	if (op_array->function_name == NULL) {
++		ZEND_RECUR_FAIL("recur can only be used inside a function");
++	}
++	if (op_array->fn_flags & ZEND_ACC_GENERATOR) {
++		ZEND_RECUR_FAIL("recur cannot be used in a generator");
++	}
++	if (op_array->fn_flags & ZEND_ACC_VARIADIC) {
++		ZEND_RECUR_FAIL("recur cannot be used in a variadic function");
++	}
++	if (CG(context).try_catch_offset != (uint32_t)-1) {
++		ZEND_RECUR_FAIL("recur is not supported inside try/catch/finally");
++	}
++	if (args->children != op_array->num_args) {
++		ZEND_RECUR_FAIL("recur expects exactly %u argument%s (one per declared parameter), %u given",
++			op_array->num_args, op_array->num_args == 1 ? "" : "s", args->children);
++	}
++	for (i = 0; i < args->children; i++) {
++		if (args->child[i]->kind == ZEND_AST_UNPACK) {
++			ZEND_RECUR_FAIL("recur does not support argument unpacking");
++		}
++		if (args->child[i]->kind == ZEND_AST_NAMED_ARG) {
++			ZEND_RECUR_FAIL("recur does not support named arguments");
++		}
++	}
++	for (i = 0; i < op_array->num_args; i++) {
++		if (ZEND_ARG_SEND_MODE(&op_array->arg_info[i])) {
++			ZEND_RECUR_FAIL("recur cannot rebind by-reference parameter $%s",
++				ZSTR_VAL(op_array->arg_info[i].name));
++		}
++	}
++#undef ZEND_RECUR_FAIL
++	return true;
++}
++/* }}} */
++
++/* Explicit recur(...): validate loudly, then emit. */
++static void zend_compile_recur(zend_ast *call_ast) /* {{{ */
++{
++	zend_ast_list *args = zend_ast_get_list(call_ast->child[1]);
++	zend_validate_recur(args, /* silent */ false);
++	zend_emit_recur_jump(args);
++}
++/* }}} */
++
++/* Automatic TCO: `return f(...)` where f is the enclosing plain function and
++ * the call is a simple positional self-call. Conservative — any doubt means
++ * an ordinary call is emitted instead. Methods are excluded (a subclass
++ * override must keep dynamic dispatch); closures have no callable name. */
++static bool zend_try_compile_self_tco(zend_ast *expr_ast) /* {{{ */
++{
++	zend_op_array *op_array = CG(active_op_array);
++
++	if (!expr_ast || expr_ast->kind != ZEND_AST_CALL) {
++		return false;
++	}
++	if (op_array->function_name == NULL
++	 || CG(active_class_entry) != NULL
++	 || (op_array->fn_flags & (ZEND_ACC_CLOSURE|ZEND_ACC_RETURN_REFERENCE))) {
++		return false;
++	}
++
++	zend_ast *name_ast = expr_ast->child[0];
++	if (name_ast->kind != ZEND_AST_ZVAL
++	 || Z_TYPE_P(zend_ast_get_zval(name_ast)) != IS_STRING) {
++		return false;
++	}
++	zend_string *call_name = zend_ast_get_str(name_ast);
++	zend_string *fname = op_array->function_name;
++	size_t cl = ZSTR_LEN(call_name), fl = ZSTR_LEN(fname);
++
++	if (name_ast->attr == ZEND_NAME_FQ) {
++		if (cl != fl || zend_binary_strcasecmp(ZSTR_VAL(call_name), cl, ZSTR_VAL(fname), fl) != 0) {
++			return false;
++		}
++	} else if (name_ast->attr == ZEND_NAME_NOT_FQ) {
++		/* Unqualified: match the tail of the (possibly namespaced) enclosing
++		 * name. Inside namespace Foo, foo() resolves to Foo\foo first — which
++		 * is exactly the function being compiled. */
++		if (memchr(ZSTR_VAL(call_name), '\\', cl) != NULL
++		 || cl > fl
++		 || (cl < fl && ZSTR_VAL(fname)[fl - cl - 1] != '\\')
++		 || zend_binary_strcasecmp(ZSTR_VAL(call_name), cl, ZSTR_VAL(fname) + (fl - cl), cl) != 0) {
++			return false;
++		}
++	} else {
++		return false;
++	}
++
++	zend_ast_list *args = zend_ast_get_list(expr_ast->child[1]);
++	if (!zend_validate_recur(args, /* silent */ true)) {
++		return false;
++	}
++
++	zend_emit_recur_jump(args);
++	return true;
++}
++/* }}} */
++
+ static void zend_compile_return(zend_ast *ast) /* {{{ */
+ {
+ 	zend_ast *expr_ast = ast->child[0];
+@@ -5697,6 +5868,16 @@ static void zend_compile_return(zend_ast *ast) /* {{{ */
+ 	znode expr_node;
+ 	zend_op *opline;
+ 
++	/* `return recur(...)` -- explicit tail recursion (validated loudly). */
++	if (expr_ast && zend_ast_is_recur_call(expr_ast)) {
++		zend_compile_recur(expr_ast);
++		return;
++	}
++	/* `return f(...)` inside plain function f -- automatic self-TCO. */
++	if (expr_ast && zend_try_compile_self_tco(expr_ast)) {
++		return;
++	}
++
+ 	if (is_generator) {
+ 		/* For generators the by-ref flag refers to yields, not returns */
+ 		by_ref = 0;
+@@ -11787,6 +11968,10 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
+ 			break;
+ 		default:
+ 		{
++			if (zend_ast_is_recur_call(ast)) {
++				zend_compile_recur(ast);
++				break;
++			}
+ 			znode result;
+ 			zend_compile_expr(&result, ast);
+ 			zend_do_free(&result);

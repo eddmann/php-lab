@@ -1,0 +1,217 @@
+diff --git a/Zend/tests/with.phpt b/Zend/tests/with.phpt
+new file mode 100644
+index 00000000..8de13bd7
+--- /dev/null
++++ b/Zend/tests/with.phpt
+@@ -0,0 +1,71 @@
++--TEST--
++with expressions — clone-with sugar (named fields, spread, chaining, readonly)
++--FILE--
++<?php
++class P {
++    public function __construct(public int $a, public int $b, public string $name) {}
++}
++
++// Basic override; original is untouched.
++$p = new P(1, 2, "orig");
++$q = $p with { a: 10 };
++printf("p=%d,%d,%s q=%d,%d,%s\n", $p->a, $p->b, $p->name, $q->a, $q->b, $q->name);
++
++// Multiple fields.
++$r = $p with { a: 100, name: "changed" };
++printf("r=%d,%d,%s\n", $r->a, $r->b, $r->name);
++
++// Value expression may reference the original.
++$s = $p with { a: $p->a + 41 };
++echo $s->a, "\n";
++
++// Spread a dynamic array of overrides; later members win.
++$ov = ["a" => 7, "b" => 8];
++$t = $p with { ...$ov, b: 80 };
++printf("%d,%d\n", $t->a, $t->b);
++
++// Trailing comma is allowed.
++$u = $p with { a: 5, };
++echo $u->a, "\n";
++
++// Chaining.
++$v = $p with { a: 11 } with { b: 22 };
++printf("%d,%d\n", $v->a, $v->b);
++
++// __clone() still runs.
++class C { public int $n = 0; public function __clone() { echo "cloned\n"; } }
++$c = new C();
++$d = $c with { n: 9 };
++echo $d->n, "\n";
++
++// readonly: an in-class wither can set it; a global-scope attempt cannot.
++final class Point {
++    public function __construct(public readonly int $x, public readonly int $y) {}
++    public function withY(int $y): static { return $this with { y: $y }; }
++}
++$pt = new Point(1, 2);
++echo $pt->withY(9)->y, "\n";
++try {
++    $bad = $pt with { y: 3 };
++} catch (\Error $e) {
++    echo "readonly error\n";
++}
++
++// `with` remains usable as a method name (semi-reserved).
++class Builder {
++    public function with(string $k): string { return "method:$k"; }
++}
++echo (new Builder)->with("ok"), "\n";
++?>
++--EXPECT--
++p=1,2,orig q=10,2,orig
++r=100,2,changed
++42
++7,80
++5
++11,22
++cloned
++9
++9
++readonly error
++method:ok
+diff --git a/Zend/tests/with_comprehensive.phpt b/Zend/tests/with_comprehensive.phpt
+new file mode 100644
+index 00000000..f5046af9
+--- /dev/null
++++ b/Zend/tests/with_comprehensive.phpt
+@@ -0,0 +1,34 @@
++--TEST--
++with — fields, spread, chaining, __clone, expression operand
++--FILE--
++<?php
++class P { public function __construct(public int $age, public string $status = "new") {} }
++$p = new P(30);
++$q = $p with { age: 31 };
++printf("orig=%d,%s  new=%d,%s\n", $p->age, $p->status, $q->age, $q->status);
++// multiple fields + expression values
++$r = $p with { age: $p->age + 10, status: 'active' };
++printf("r=%d,%s\n", $r->age, $r->status);
++// spread overrides, later wins
++$over = ['age' => 99, 'status' => 'spread'];
++$s = $p with { ...$over, status: 'explicit' };
++printf("s=%d,%s\n", $s->age, $s->status);
++// chaining
++$t = $p with { age: 1 } with { age: 2 } with { status: 'chained' };
++printf("t=%d,%s\n", $t->age, $t->status);
++// __clone is honoured
++class Q { public array $tags = []; public function __clone() { print "cloned\n"; } public function __construct(public int $n) {} }
++$a = new Q(1);
++$b = $a with { n: 2 };
++printf("b->n=%d\n", $b->n);
++// expression operand
++$u = (new P(5)) with { age: 6 };
++printf("u=%d\n", $u->age);
++--EXPECT--
++orig=30,new  new=31,new
++r=40,active
++s=99,explicit
++t=2,chained
++cloned
++b->n=2
++u=6
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..fbaa2b45 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -81,6 +81,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %precedence '~' T_INT_CAST T_DOUBLE_CAST T_STRING_CAST T_ARRAY_CAST T_OBJECT_CAST T_BOOL_CAST T_UNSET_CAST '@'
+ %right T_POW
+ %precedence T_CLONE
++%precedence T_WITH
+ 
+ /* Resolve danging else conflict */
+ %precedence T_NOELSE
+@@ -116,6 +117,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token <ident> T_CLONE         "'clone'"
+ %token <ident> T_EXIT          "'exit'"
+ %token <ident> T_IF            "'if'"
++%token <ident> T_WITH          "'with'"
+ %token <ident> T_ELSEIF        "'elseif'"
+ %token <ident> T_ELSE          "'else'"
+ %token <ident> T_ENDIF         "'endif'"
+@@ -284,6 +286,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %type <ast> attributed_statement attributed_top_statement attributed_class_statement attributed_parameter
+ %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
+ %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
++%type <ast> with_member_list non_empty_with_member_list possible_with_member
+ %type <ast> enum_declaration_statement enum_backing_type enum_case enum_case_expr
+ %type <ast> function_name non_empty_member_modifiers
+ %type <ast> property_hook property_hook_list optional_property_hook_list hooked_property property_hook_body
+@@ -306,7 +309,7 @@ start:
+ 
+ reserved_non_modifiers:
+ 	  T_INCLUDE | T_INCLUDE_ONCE | T_EVAL | T_REQUIRE | T_REQUIRE_ONCE | T_LOGICAL_OR | T_LOGICAL_XOR | T_LOGICAL_AND
+-	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
++	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_WITH | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
+ 	| T_FOR | T_ENDFOR | T_FOREACH | T_ENDFOREACH | T_DECLARE | T_ENDDECLARE | T_AS | T_TRY | T_CATCH | T_FINALLY
+ 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
+ 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
+@@ -751,6 +754,32 @@ match_arm_cond_list:
+ 	|	match_arm_cond_list ',' expr { $$ = zend_ast_list_add($1, $3); }
+ ;
+ 
++/* Members of a `with { ... }` block. Built into a plain ZEND_AST_ARRAY so the
++ * desugar can hand it to clone() as the override array. A bare identifier becomes
++ * a constant string key (like named-argument syntax); `...$x` spreads. The
++ * empty-member + rtrim pattern (mirroring array_pair_list) permits a trailing
++ * comma without introducing a grammar conflict. */
++with_member_list:
++		non_empty_with_member_list
++			{ $$ = zend_ast_list_rtrim($1); }
++;
++
++non_empty_with_member_list:
++		possible_with_member
++			{ $$ = zend_ast_create_list(1, ZEND_AST_ARRAY, $1); }
++	|	non_empty_with_member_list ',' possible_with_member
++			{ $$ = zend_ast_list_add($1, $3); }
++;
++
++possible_with_member:
++		%empty
++			{ $$ = NULL; }
++	|	identifier ':' expr
++			{ $$ = zend_ast_create(ZEND_AST_ARRAY_ELEM, $3, $1); }
++	|	T_ELLIPSIS expr
++			{ $$ = zend_ast_create(ZEND_AST_UNPACK, $2); }
++;
++
+ 
+ while_statement:
+ 		statement { $$ = $1; }
+@@ -1266,6 +1295,14 @@ expr:
+ 			name->attr = ZEND_NAME_FQ;
+ 			$$ = zend_ast_create(ZEND_AST_CALL, name, zend_ast_create_list(1, ZEND_AST_ARG_LIST, $2));
+ 		}
++	|	expr T_WITH '{' with_member_list '}' {
++			/* `$obj with { k: v, ... }` desugars to PHP 8.5 clone-with:
++			 * clone($obj, ['k' => v, ...]). Pure parser sugar — no AST/compiler. */
++			zend_ast *name = zend_ast_create_zval_from_str(ZSTR_KNOWN(ZEND_STR_CLONE));
++			name->attr = ZEND_NAME_FQ;
++			$$ = zend_ast_create(ZEND_AST_CALL, name,
++				zend_ast_create_list(2, ZEND_AST_ARG_LIST, $1, $4));
++		}
+ 	|	variable T_PLUS_EQUAL expr
+ 			{ $$ = zend_ast_create_assign_op(ZEND_ADD, $1, $3); }
+ 	|	variable T_MINUS_EQUAL expr
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..323661ad 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1454,6 +1454,10 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_IF);
+ }
+ 
++<ST_IN_SCRIPTING>"with" {
++	RETURN_TOKEN_WITH_IDENT(T_WITH);
++}
++
+ <ST_IN_SCRIPTING>"elseif" {
+ 	RETURN_TOKEN_WITH_IDENT(T_ELSEIF);
+ }

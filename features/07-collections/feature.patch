@@ -1,0 +1,2429 @@
+diff --git a/Zend/tests/collections_integration.phpt b/Zend/tests/collections_integration.phpt
+new file mode 100644
+index 00000000..149d2206
+--- /dev/null
++++ b/Zend/tests/collections_integration.phpt
+@@ -0,0 +1,32 @@
++--TEST--
++Collections — Vector/Map/Set full API, structural sharing, operators
++--FILE--
++<?php
++$a = Vector::of(1, 2, 3);
++$b = $a->push(4);
++$c = $b->set(0, 99);
++echo "$a | $b | $c\n";                  // $a unchanged (structural sharing)
++echo $a->count(), " ", $b->count(), " ", $c->first(), " ", $c->last(), "\n";
++echo $a->map(fn($x)=>$x*10)->reduce(fn($acc,$x)=>$acc+$x, 0), "\n";
++echo $a->filter(fn($x)=>$x%2), "\n";
++echo (Vector::of(1,2) + Vector::of(3,4)), "\n";
++$m = Map::fromArray(['a'=>1, 'b'=>2]);
++$m2 = $m->set('c', 3)->remove('a');
++echo ($m->has('a')?"y":"n"), ($m2->has('a')?"y":"n"), " c=", $m2->get('c'), " z=", $m->get('z', -1), "\n";
++echo Map::fromArray([])->set(1,'int')->set("1",'str')->count(), "\n";  // 1 vs "1" distinct
++$s = Set::of(1, 2, 2, 3);
++echo $s->count(), " has2=", ($s->has(2)?"y":"n"), "\n";
++echo ($s | Set::of(3,4,5)), " / ", ($s & Set::of(2,3,9)), " / ", ($s - Set::of(2)), "\n";
++$sum = 0; foreach (Vector::of(10,20,30) as $x) $sum += $x;
++echo "iter=$sum count=", count(Vector::of(1,2,3,4,5)), "\n";
++--EXPECT--
++Vector(1, 2, 3) | Vector(1, 2, 3, 4) | Vector(99, 2, 3, 4)
++3 4 99 4
++60
++Vector(1, 3)
++Vector(1, 2, 3, 4)
++yn c=3 z=-1
++2
++3 has2=y
++Set(1, 2, 3, 4, 5) / Set(2, 3) / Set(1, 3)
++iter=60 count=5
+diff --git a/Zend/tests/persistent_map.phpt b/Zend/tests/persistent_map.phpt
+new file mode 100644
+index 00000000..12e80715
+--- /dev/null
++++ b/Zend/tests/persistent_map.phpt
+@@ -0,0 +1,52 @@
++--TEST--
++Map — persistent immutable key/value map (HAMT, structural sharing)
++--FILE--
++<?php
++$m = Map::fromArray(["a" => 1, "b" => 2]);
++echo count($m), " ", $m->get("a"), $m->get("b"), "\n";
++echo ($m->has("a") ? "y" : "n"), ($m->has("z") ? "y" : "n"), "\n";
++echo $m->get("missing", "DEF"), "\n";
++
++// Immutability: each op returns a new Map; the source is unchanged.
++$a = Map::fromArray(["x" => 1]);
++$b = $a->set("y", 2);
++$c = $b->remove("x");
++echo count($a), "/", count($b), "/", count($c), "\n";
++echo ($a->has("y") ? "y" : "n"), ($c->has("x") ? "y" : "n"), "\n";
++
++// int and string keys are distinct (unlike PHP arrays).
++$k = (new Map())->set(1, "int")->set("1", "str");
++echo count($k), " ", $k->get(1), " ", $k->get("1"), "\n";
++
++// keys / values / map / filter (HAMT is unordered, so normalise for output).
++$src = Map::fromArray(["a" => 1, "b" => 2, "c" => 3]);
++$keys = $src->keys(); sort($keys);
++$vals = $src->values(); sort($vals);
++echo implode(",", $keys), " ", implode(",", $vals), "\n";
++$doubled = $src->map(fn($v) => $v * 10)->toArray(); ksort($doubled);
++echo json_encode($doubled), "\n";
++$big = $src->filter(fn($v) => $v >= 2)->toArray(); ksort($big);
++echo json_encode($big), "\n";
++
++// Large-N integrity.
++$n = new Map();
++for ($i = 0; $i < 3000; $i++) $n = $n->set("k$i", $i);
++$ok = count($n) === 3000;
++for ($i = 0; $i < 3000; $i++) if ($n->get("k$i") !== $i) { $ok = false; break; }
++echo $ok ? "big ok" : "big BAD", "\n";
++
++// Non int/string key is a type error.
++try { (new Map())->set([1], "x"); } catch (\TypeError $e) { echo "type error\n"; }
++?>
++--EXPECT--
++2 12
++yn
++DEF
++1/2/1
++nn
++2 int str
++a,b,c 1,2,3
++{"a":10,"b":20,"c":30}
++{"b":2,"c":3}
++big ok
++type error
+diff --git a/Zend/tests/persistent_set.phpt b/Zend/tests/persistent_set.phpt
+new file mode 100644
+index 00000000..b6256639
+--- /dev/null
++++ b/Zend/tests/persistent_set.phpt
+@@ -0,0 +1,46 @@
++--TEST--
++Set — persistent immutable set of unique members (HAMT, operators)
++--FILE--
++<?php
++// Construction de-duplicates.
++$s = Set::of(1, 2, 2, 3, 3, 3);
++echo count($s), " ", $s->has(2) ? "y" : "n", $s->has(9) ? "y" : "n", "\n";
++
++// Immutability.
++$a = Set::of(1, 2);
++$b = $a->add(3);
++$c = $b->remove(1);
++echo count($a), "/", count($b), "/", count($c), "\n";
++
++// Set algebra via methods and operators (sort members for stable output).
++function show(Set $s): string { $a = $s->toArray(); sort($a); return implode(",", $a); }
++$x = Set::of(1, 2, 3);
++$y = Set::of(2, 3, 4);
++echo show($x->union($y)), " ", show($x->intersect($y)), " ", show($x->diff($y)), "\n";
++echo show($x | $y), " ", show($x & $y), " ", show($x - $y), "\n";
++
++// map / filter.
++echo show(Set::of(1, 2, 3, 4)->filter(fn($v) => $v % 2 === 0)), "\n";
++echo show(Set::of(1, 2, 3)->map(fn($v) => $v * $v)), "\n";
++
++// String members.
++echo show(Set::fromArray(["a", "b", "a", "c"])), "\n";
++
++// Large-N with collisions (mod) collapses to the distinct members.
++$big = new Set();
++for ($i = 0; $i < 3000; $i++) $big = $big->add($i % 1500);
++echo count($big), " ", $big->has(1499) ? "y" : "n", "\n";
++
++// Non int/string member is a type error.
++try { Set::of([1]); } catch (\TypeError $e) { echo "type error\n"; }
++?>
++--EXPECT--
++3 yn
++2/3/2
++1,2,3,4 2,3 1
++1,2,3,4 2,3 1
++2,4
++1,4,9
++a,b,c
++1500 y
++type error
+diff --git a/Zend/tests/persistent_vector.phpt b/Zend/tests/persistent_vector.phpt
+new file mode 100644
+index 00000000..97a405d2
+--- /dev/null
++++ b/Zend/tests/persistent_vector.phpt
+@@ -0,0 +1,75 @@
++--TEST--
++Vector — persistent immutable ordered sequence (structural sharing)
++--FILE--
++<?php
++// Construction.
++$v = Vector::of(1, 2, 3);
++echo $v, "\n";
++echo count($v), " ", $v->isEmpty() ? "empty" : "nonempty", "\n";
++echo new Vector([10, 20, 30]), "\n";
++echo Vector::fromArray([7, 8]), "\n";
++
++// Access.
++echo $v->get(0), $v->get(2), " ", $v->first(), $v->last(), "\n";
++
++// Immutability: every "mutation" returns a new value; the original is untouched.
++$a = Vector::of(1, 2, 3);
++$b = $a->push(4);
++$c = $a->set(1, 99);
++$d = $a->pop();
++echo $a, " ", $b, " ", $c, " ", $d, "\n";
++
++// Transforms.
++$nums = Vector::of(1, 2, 3, 4);
++echo $nums->map(fn($x) => $x * 10), "\n";
++echo $nums->filter(fn($x) => $x % 2 === 0), "\n";
++echo $nums->reduce(fn($acc, $x) => $acc + $x, 0), "\n";
++echo $nums->slice(1, 2), "\n";
++
++// Concatenation: method and `+` operator.
++echo Vector::of(1, 2)->concat(Vector::of(3, 4)), "\n";
++echo Vector::of(1, 2) + Vector::of(3, 4), "\n";
++
++// Iteration.
++$pairs = [];
++foreach (Vector::of('a', 'b', 'c') as $i => $x) {
++    $pairs[] = "$i:$x";
++}
++echo implode(' ', $pairs), "\n";
++
++// Large-N integrity across trie height-growth boundaries (32, 1024, …).
++$big = Vector::of();
++for ($i = 0; $i < 3000; $i++) {
++    $big = $big->push($i);
++}
++$ok = count($big) === 3000 && $big->get(0) === 0 && $big->get(32) === 32
++   && $big->get(1024) === 1024 && $big->last() === 2999;
++echo $ok ? "big ok" : "big BAD", "\n";
++
++// Structural sharing leaves the source intact after a deep update.
++$src = Vector::fromArray(range(0, 2000));
++$upd = $src->set(1500, -1);
++echo $src->get(1500), " ", $upd->get(1500), "\n";
++
++// Bounds checks throw.
++try { Vector::of(1)->get(5); } catch (\Error $e) { echo "range error\n"; }
++try { Vector::of()->pop(); } catch (\Error $e) { echo "empty pop error\n"; }
++?>
++--EXPECT--
++Vector(1, 2, 3)
++3 nonempty
++Vector(10, 20, 30)
++Vector(7, 8)
++13 13
++Vector(1, 2, 3) Vector(1, 2, 3, 4) Vector(1, 99, 3) Vector(1, 2)
++Vector(10, 20, 30, 40)
++Vector(2, 4)
++10
++Vector(2, 3)
++Vector(1, 2, 3, 4)
++Vector(1, 2, 3, 4)
++0:a 1:b 2:c
++big ok
++1500 -1
++range error
++empty pop error
+diff --git a/Zend/tests/unset/bug40833.phpt b/Zend/tests/unset/bug40833.phpt
+index 1abf580e..b6dc14d3 100644
+--- a/Zend/tests/unset/bug40833.phpt
++++ b/Zend/tests/unset/bug40833.phpt
+@@ -12,7 +12,7 @@ Bug #40833 (Crash when using unset() on an ArrayAccess object retrieved via __ge
+             if ( isset($this->data[$name]) )
+                 return $this->data[$name];
+             else
+-                return $this->data[$name] = new set($this);
++                return $this->data[$name] = new entity_set($this);
+         }
+ 
+         function __set($name, $value)
+@@ -21,7 +21,7 @@ Bug #40833 (Crash when using unset() on an ArrayAccess object retrieved via __ge
+         }
+     }
+ 
+-    class set implements ArrayAccess
++    class entity_set implements ArrayAccess
+     {
+         private $entity;
+ 
+diff --git a/Zend/zend_default_classes.c b/Zend/zend_default_classes.c
+index 7ab9b832..9c11a8f0 100644
+--- a/Zend/zend_default_classes.c
++++ b/Zend/zend_default_classes.c
+@@ -28,6 +28,7 @@
+ #include "zend_weakrefs.h"
+ #include "zend_enum.h"
+ #include "zend_fibers.h"
++#include "zend_persistent.h"
+ 
+ ZEND_API void zend_register_default_classes(void)
+ {
+@@ -40,4 +41,5 @@ ZEND_API void zend_register_default_classes(void)
+ 	zend_register_attribute_ce();
+ 	zend_register_enum_ce();
+ 	zend_register_fiber_ce();
++	zend_register_persistent();
+ }
+diff --git a/Zend/zend_persistent.c b/Zend/zend_persistent.c
+new file mode 100644
+index 00000000..81c8e72b
+--- /dev/null
++++ b/Zend/zend_persistent.c
+@@ -0,0 +1,1697 @@
++/*
++   +----------------------------------------------------------------------+
++   | Built-in persistent (immutable, structurally-shared) collections.    |
++   |                                                                      |
++   | Vector is a bit-partitioned trie (branching factor 32). Each trie    |
++   | node is an ordinary (refcounted, COW) zend_array, so structural      |
++   | sharing, recursive free, and GC all come from the engine: a path     |
++   | copy is `zend_array_dup` of just the spine — untouched sibling       |
++   | subtrees are refcount-bumped (shared), not deep-copied.              |
++   +----------------------------------------------------------------------+
++*/
++
++#include "zend.h"
++#include "zend_API.h"
++#include "zend_interfaces.h"
++#include "zend_exceptions.h"
++#include "zend_smart_str.h"
++#include "zend_persistent.h"
++#include "zend_persistent_arginfo.h"
++
++ZEND_API zend_class_entry *zend_ce_persistent_vector;
++
++#define PV_BITS  5
++#define PV_WIDTH 32
++#define PV_MASK  31
++
++/* ---------------- object plumbing ---------------- */
++
++typedef struct {
++	zval        root;   /* IS_ARRAY: the trie root node */
++	uint32_t    size;   /* number of elements */
++	uint32_t    shift;  /* 5 * (height - 1); 0 when the root is a leaf */
++	zend_object std;
++} pv_vector;
++
++static zend_object_handlers pv_vector_handlers;
++
++static zend_always_inline pv_vector *pv_from_obj(zend_object *obj)
++{
++	return (pv_vector *)((char *)(obj) - XtOffsetOf(pv_vector, std));
++}
++#define Z_PVVEC_P(zv) pv_from_obj(Z_OBJ_P(zv))
++
++static zend_object *pv_vector_create(zend_class_entry *ce)
++{
++	pv_vector *v = zend_object_alloc(sizeof(pv_vector), ce);
++	zend_object_std_init(&v->std, ce);
++	object_properties_init(&v->std, ce);
++	ZVAL_ARR(&v->root, zend_new_array(0));
++	v->size = 0;
++	v->shift = 0;
++	v->std.handlers = &pv_vector_handlers;
++	return &v->std;
++}
++
++static void pv_vector_free(zend_object *obj)
++{
++	pv_vector *v = pv_from_obj(obj);
++	zval_ptr_dtor(&v->root);
++	zend_object_std_dtor(&v->std);
++}
++
++static zend_object *pv_vector_clone(zend_object *obj)
++{
++	pv_vector *src = pv_from_obj(obj);
++	zend_object *new_obj = pv_vector_create(obj->ce);
++	pv_vector *dst = pv_from_obj(new_obj);
++	zval_ptr_dtor(&dst->root);
++	ZVAL_COPY(&dst->root, &src->root); /* share the trie */
++	dst->size = src->size;
++	dst->shift = src->shift;
++	return new_obj;
++}
++
++static HashTable *pv_vector_get_gc(zend_object *obj, zval **table, int *n)
++{
++	pv_vector *v = pv_from_obj(obj);
++	*table = &v->root;
++	*n = 1;
++	return NULL;
++}
++
++/* Build a Vector object from an owned (root, size, shift) triple. Takes
++ * ownership of *root (no refcount change). */
++static void pv_make(zval *out, zval *root, uint32_t size, uint32_t shift)
++{
++	object_init_ex(out, zend_ce_persistent_vector);
++	pv_vector *v = Z_PVVEC_P(out);
++	zval_ptr_dtor(&v->root);
++	ZVAL_COPY_VALUE(&v->root, root);
++	v->size = size;
++	v->shift = shift;
++}
++
++/* ---------------- trie operations ---------------- */
++
++/* element at logical index i (caller guarantees i < size) */
++static zval *pv_trie_get(pv_vector *v, uint32_t i)
++{
++	zend_array *node = Z_ARR(v->root);
++	for (uint32_t s = v->shift; s > 0; s -= PV_BITS) {
++		zval *childz = zend_hash_index_find(node, (i >> s) & PV_MASK);
++		node = Z_ARR_P(childz);
++	}
++	return zend_hash_index_find(node, i & PV_MASK);
++}
++
++/* Path-copy: return a fresh (refcount 1) node equal to `node` but with logical
++ * index i set to *val. Intermediate nodes are created as needed (so this also
++ * handles appending at index == size). */
++static zend_array *pv_trie_assoc(zend_array *node, uint32_t shift, uint32_t i, zval *val)
++{
++	zend_array *copy = node ? zend_array_dup(node) : zend_new_array(1);
++	uint32_t slot = (i >> shift) & PV_MASK;
++	if (shift == 0) {
++		Z_TRY_ADDREF_P(val);
++		zend_hash_index_update(copy, slot, val);
++	} else {
++		zval *childz = node ? zend_hash_index_find(node, slot) : NULL;
++		zend_array *child = childz ? Z_ARR_P(childz) : NULL;
++		zend_array *newchild = pv_trie_assoc(child, shift - PV_BITS, i, val);
++		zval cz;
++		ZVAL_ARR(&cz, newchild);
++		zend_hash_index_update(copy, slot, &cz);
++	}
++	return copy;
++}
++
++/* Path-copy removing the last logical index i (== size-1). */
++static zend_array *pv_trie_pop(zend_array *node, uint32_t shift, uint32_t i)
++{
++	zend_array *copy = zend_array_dup(node);
++	uint32_t slot = (i >> shift) & PV_MASK;
++	if (shift == 0) {
++		zend_hash_index_del(copy, slot);
++	} else {
++		zval *childz = zend_hash_index_find(node, slot);
++		zend_array *newchild = pv_trie_pop(Z_ARR_P(childz), shift - PV_BITS, i);
++		if (zend_hash_num_elements(newchild) == 0) {
++			zend_array_release(newchild);
++			zend_hash_index_del(copy, slot);
++		} else {
++			zval cz;
++			ZVAL_ARR(&cz, newchild);
++			zend_hash_index_update(copy, slot, &cz);
++		}
++	}
++	return copy;
++}
++
++/* In-place builder used to construct vectors element-by-element. */
++typedef struct { zval root; uint32_t size; uint32_t shift; } pv_builder;
++
++static void pv_builder_init(pv_builder *b)
++{
++	ZVAL_ARR(&b->root, zend_new_array(0));
++	b->size = 0;
++	b->shift = 0;
++}
++
++static void pv_builder_push(pv_builder *b, zval *val)
++{
++	if (b->size == 0) {
++		zend_array *leaf = zend_new_array(1);
++		Z_TRY_ADDREF_P(val);
++		zend_hash_index_add_new(leaf, 0, val);
++		zval_ptr_dtor(&b->root);
++		ZVAL_ARR(&b->root, leaf);
++		b->size = 1;
++		return;
++	}
++	uint32_t cap = 1u << (b->shift + PV_BITS);
++	if (b->size == cap) {
++		/* root full: add a level, old root becomes child 0 */
++		zend_array *nr = zend_new_array(2);
++		zend_hash_index_add_new(nr, 0, &b->root); /* moves ownership */
++		ZVAL_ARR(&b->root, nr);
++		b->shift += PV_BITS;
++	}
++	zend_array *newroot = pv_trie_assoc(Z_ARR(b->root), b->shift, b->size, val);
++	zval_ptr_dtor(&b->root);
++	ZVAL_ARR(&b->root, newroot);
++	b->size++;
++}
++
++/* Append every element of the trie (in order) to a flat output array. */
++static void pv_collect(zend_array *node, uint32_t shift, zend_array *out)
++{
++	zval *z;
++	if (shift == 0) {
++		ZEND_HASH_FOREACH_VAL(node, z) {
++			Z_TRY_ADDREF_P(z);
++			zend_hash_next_index_insert(out, z);
++		} ZEND_HASH_FOREACH_END();
++	} else {
++		ZEND_HASH_FOREACH_VAL(node, z) {
++			pv_collect(Z_ARR_P(z), shift - PV_BITS, out);
++		} ZEND_HASH_FOREACH_END();
++	}
++}
++
++static void pv_to_zend_array(pv_vector *v, zval *out)
++{
++	zend_array *arr = zend_new_array(v->size);
++	if (v->size) {
++		pv_collect(Z_ARR(v->root), v->shift, arr);
++	}
++	ZVAL_ARR(out, arr);
++}
++
++/* ---------------- methods ---------------- */
++
++static void pv_throw_range(zend_long index, uint32_t size)
++{
++	zend_throw_error(NULL, "Vector index " ZEND_LONG_FMT " is out of range [0, %u)", index, size);
++}
++
++ZEND_METHOD(Vector, __construct)
++{
++	zval *values = NULL;
++	ZEND_PARSE_PARAMETERS_START(0, 1)
++		Z_PARAM_OPTIONAL
++		Z_PARAM_ARRAY(values)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!values || zend_hash_num_elements(Z_ARRVAL_P(values)) == 0) {
++		return;
++	}
++
++	pv_vector *self = Z_PVVEC_P(ZEND_THIS);
++	pv_builder b;
++	pv_builder_init(&b);
++
++	zval *v;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(values), v) {
++		ZVAL_DEREF(v);
++		pv_builder_push(&b, v);
++	} ZEND_HASH_FOREACH_END();
++
++	zval_ptr_dtor(&self->root);
++	ZVAL_COPY_VALUE(&self->root, &b.root);
++	self->size = b.size;
++	self->shift = b.shift;
++}
++
++ZEND_METHOD(Vector, of)
++{
++	zval *args;
++	uint32_t argc;
++	ZEND_PARSE_PARAMETERS_START(0, -1)
++		Z_PARAM_VARIADIC('+', args, argc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_builder b;
++	pv_builder_init(&b);
++	for (uint32_t i = 0; i < argc; i++) {
++		pv_builder_push(&b, &args[i]);
++	}
++	pv_make(return_value, &b.root, b.size, b.shift);
++}
++
++ZEND_METHOD(Vector, fromArray)
++{
++	zval *arr;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ARRAY(arr)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_builder b;
++	pv_builder_init(&b);
++	zval *v;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(arr), v) {
++		ZVAL_DEREF(v);
++		pv_builder_push(&b, v);
++	} ZEND_HASH_FOREACH_END();
++	pv_make(return_value, &b.root, b.size, b.shift);
++}
++
++ZEND_METHOD(Vector, count)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_LONG(Z_PVVEC_P(ZEND_THIS)->size);
++}
++
++ZEND_METHOD(Vector, isEmpty)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(Z_PVVEC_P(ZEND_THIS)->size == 0);
++}
++
++ZEND_METHOD(Vector, get)
++{
++	zend_long index;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_LONG(index)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	if (index < 0 || (uint32_t)index >= v->size) {
++		pv_throw_range(index, v->size);
++		RETURN_THROWS();
++	}
++	zval *zv = pv_trie_get(v, (uint32_t)index);
++	RETURN_COPY_DEREF(zv);
++}
++
++ZEND_METHOD(Vector, first)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	if (v->size == 0) {
++		zend_throw_error(NULL, "Cannot get first() of an empty Vector");
++		RETURN_THROWS();
++	}
++	RETURN_COPY_DEREF(pv_trie_get(v, 0));
++}
++
++ZEND_METHOD(Vector, last)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	if (v->size == 0) {
++		zend_throw_error(NULL, "Cannot get last() of an empty Vector");
++		RETURN_THROWS();
++	}
++	RETURN_COPY_DEREF(pv_trie_get(v, v->size - 1));
++}
++
++ZEND_METHOD(Vector, push)
++{
++	zval *val;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(val)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	pv_builder b;
++	b.root = v->root;
++	Z_TRY_ADDREF(b.root);
++	b.size = v->size;
++	b.shift = v->shift;
++	pv_builder_push(&b, val);
++	pv_make(return_value, &b.root, b.size, b.shift);
++}
++
++ZEND_METHOD(Vector, pop)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	if (v->size == 0) {
++		zend_throw_error(NULL, "Cannot pop() an empty Vector");
++		RETURN_THROWS();
++	}
++	if (v->size == 1) {
++		zval empty;
++		ZVAL_ARR(&empty, zend_new_array(0));
++		pv_make(return_value, &empty, 0, 0);
++		return;
++	}
++	zend_array *newroot = pv_trie_pop(Z_ARR(v->root), v->shift, v->size - 1);
++	uint32_t shift = v->shift;
++	while (shift > 0 && zend_hash_num_elements(newroot) == 1) {
++		zval *only = zend_hash_index_find(newroot, 0);
++		zend_array *child = Z_ARR_P(only);
++		GC_ADDREF(child);
++		zend_array_release(newroot);
++		newroot = child;
++		shift -= PV_BITS;
++	}
++	zval rootz;
++	ZVAL_ARR(&rootz, newroot);
++	pv_make(return_value, &rootz, v->size - 1, shift);
++}
++
++ZEND_METHOD(Vector, set)
++{
++	zend_long index;
++	zval *val;
++	ZEND_PARSE_PARAMETERS_START(2, 2)
++		Z_PARAM_LONG(index)
++		Z_PARAM_ZVAL(val)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	if (index < 0 || (uint32_t)index >= v->size) {
++		pv_throw_range(index, v->size);
++		RETURN_THROWS();
++	}
++	zend_array *newroot = pv_trie_assoc(Z_ARR(v->root), v->shift, (uint32_t)index, val);
++	zval rootz;
++	ZVAL_ARR(&rootz, newroot);
++	pv_make(return_value, &rootz, v->size, v->shift);
++}
++
++ZEND_METHOD(Vector, toArray)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_to_zend_array(Z_PVVEC_P(ZEND_THIS), return_value);
++}
++
++ZEND_METHOD(Vector, map)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	zval flat;
++	pv_to_zend_array(v, &flat);
++
++	pv_builder b;
++	pv_builder_init(&b);
++	zval *elem;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL(flat), elem) {
++		zval ret, arg;
++		ZVAL_COPY(&arg, elem);
++		fci.param_count = 1;
++		fci.params = &arg;
++		fci.retval = &ret;
++		fci.named_params = NULL;
++		if (zend_call_function(&fci, &fcc) == SUCCESS && !EG(exception)) {
++			pv_builder_push(&b, &ret);
++		}
++		zval_ptr_dtor(&arg);
++		zval_ptr_dtor(&ret);
++		if (EG(exception)) {
++			break;
++		}
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&flat);
++	if (EG(exception)) {
++		zval_ptr_dtor(&b.root);
++		RETURN_THROWS();
++	}
++	pv_make(return_value, &b.root, b.size, b.shift);
++}
++
++ZEND_METHOD(Vector, filter)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	zval flat;
++	pv_to_zend_array(v, &flat);
++
++	pv_builder b;
++	pv_builder_init(&b);
++	zval *elem;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL(flat), elem) {
++		zval ret, arg;
++		ZVAL_COPY(&arg, elem);
++		fci.param_count = 1;
++		fci.params = &arg;
++		fci.retval = &ret;
++		fci.named_params = NULL;
++		if (zend_call_function(&fci, &fcc) == SUCCESS && !EG(exception) && zend_is_true(&ret)) {
++			pv_builder_push(&b, elem);
++		}
++		zval_ptr_dtor(&arg);
++		zval_ptr_dtor(&ret);
++		if (EG(exception)) {
++			break;
++		}
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&flat);
++	if (EG(exception)) {
++		zval_ptr_dtor(&b.root);
++		RETURN_THROWS();
++	}
++	pv_make(return_value, &b.root, b.size, b.shift);
++}
++
++ZEND_METHOD(Vector, reduce)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	zval *initial = NULL;
++	ZEND_PARSE_PARAMETERS_START(1, 2)
++		Z_PARAM_FUNC(fci, fcc)
++		Z_PARAM_OPTIONAL
++		Z_PARAM_ZVAL(initial)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	zval acc;
++	if (initial) {
++		ZVAL_COPY(&acc, initial);
++	} else {
++		ZVAL_NULL(&acc);
++	}
++
++	zval flat;
++	pv_to_zend_array(v, &flat);
++	zval *elem;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL(flat), elem) {
++		zval ret, args[2];
++		ZVAL_COPY(&args[0], &acc);
++		ZVAL_COPY(&args[1], elem);
++		fci.param_count = 2;
++		fci.params = args;
++		fci.retval = &ret;
++		fci.named_params = NULL;
++		zend_result r = zend_call_function(&fci, &fcc);
++		zval_ptr_dtor(&args[0]);
++		zval_ptr_dtor(&args[1]);
++		if (r == SUCCESS && !EG(exception)) {
++			zval_ptr_dtor(&acc);
++			ZVAL_COPY_VALUE(&acc, &ret);
++		} else {
++			zval_ptr_dtor(&ret);
++			break;
++		}
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&flat);
++	if (EG(exception)) {
++		zval_ptr_dtor(&acc);
++		RETURN_THROWS();
++	}
++	RETURN_COPY_VALUE(&acc);
++}
++
++ZEND_METHOD(Vector, slice)
++{
++	zend_long offset;
++	zend_long length;
++	bool length_is_null = true;
++	ZEND_PARSE_PARAMETERS_START(1, 2)
++		Z_PARAM_LONG(offset)
++		Z_PARAM_OPTIONAL
++		Z_PARAM_LONG_OR_NULL(length, length_is_null)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	zend_long size = v->size;
++	if (offset < 0) {
++		offset = size + offset;
++		if (offset < 0) offset = 0;
++	}
++	if (offset > size) offset = size;
++	zend_long end = length_is_null ? size : (offset + (length < 0 ? size + length - offset : length));
++	if (end > size) end = size;
++	if (end < offset) end = offset;
++
++	pv_builder b;
++	pv_builder_init(&b);
++	for (zend_long i = offset; i < end; i++) {
++		pv_builder_push(&b, pv_trie_get(v, (uint32_t)i));
++	}
++	pv_make(return_value, &b.root, b.size, b.shift);
++}
++
++static void pv_concat_into(pv_builder *b, pv_vector *v)
++{
++	if (v->size == 0) {
++		return;
++	}
++	zval flat;
++	pv_to_zend_array(v, &flat);
++	zval *elem;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL(flat), elem) {
++		pv_builder_push(b, elem);
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&flat);
++}
++
++ZEND_METHOD(Vector, concat)
++{
++	zval *other;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_OBJECT_OF_CLASS(other, zend_ce_persistent_vector)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_builder b;
++	pv_builder_init(&b);
++	pv_concat_into(&b, Z_PVVEC_P(ZEND_THIS));
++	pv_concat_into(&b, Z_PVVEC_P(other));
++	pv_make(return_value, &b.root, b.size, b.shift);
++}
++
++static void pv_append_scalar(smart_str *buf, zval *zv)
++{
++	ZVAL_DEREF(zv);
++	switch (Z_TYPE_P(zv)) {
++		case IS_NULL: smart_str_appends(buf, "null"); break;
++		case IS_TRUE: smart_str_appends(buf, "true"); break;
++		case IS_FALSE: smart_str_appends(buf, "false"); break;
++		case IS_LONG: smart_str_append_long(buf, Z_LVAL_P(zv)); break;
++		case IS_STRING:
++			smart_str_appendc(buf, '"');
++			smart_str_append(buf, Z_STR_P(zv));
++			smart_str_appendc(buf, '"');
++			break;
++		case IS_DOUBLE: {
++			zend_string *s = zend_strpprintf(0, "%.14G", Z_DVAL_P(zv));
++			smart_str_append(buf, s);
++			zend_string_release(s);
++			break;
++		}
++		default:
++			smart_str_appends(buf, zend_zval_type_name(zv));
++			break;
++	}
++}
++
++ZEND_METHOD(Vector, __toString)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_vector *v = Z_PVVEC_P(ZEND_THIS);
++	smart_str buf = {0};
++	smart_str_appends(&buf, "Vector(");
++	if (v->size) {
++		zval flat;
++		pv_to_zend_array(v, &flat);
++		bool first = true;
++		zval *elem;
++		ZEND_HASH_FOREACH_VAL(Z_ARRVAL(flat), elem) {
++			if (!first) smart_str_appends(&buf, ", ");
++			first = false;
++			pv_append_scalar(&buf, elem);
++		} ZEND_HASH_FOREACH_END();
++		zval_ptr_dtor(&flat);
++	}
++	smart_str_appendc(&buf, ')');
++	smart_str_0(&buf);
++	RETURN_STR(smart_str_extract(&buf));
++}
++
++ZEND_METHOD(Vector, getIterator)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	zval arr;
++	pv_to_zend_array(Z_PVVEC_P(ZEND_THIS), &arr);
++
++	zend_string *name = zend_string_init("ArrayIterator", sizeof("ArrayIterator") - 1, 0);
++	zend_class_entry *ce_it = zend_lookup_class(name);
++	zend_string_release(name);
++	if (!ce_it) {
++		zval_ptr_dtor(&arr);
++		zend_throw_error(NULL, "ArrayIterator is not available");
++		RETURN_THROWS();
++	}
++	object_init_ex(return_value, ce_it);
++	zval ctor_ret;
++	ZVAL_UNDEF(&ctor_ret);
++	zend_call_known_instance_method_with_1_params(
++		ce_it->constructor, Z_OBJ_P(return_value), &ctor_ret, &arr);
++	zval_ptr_dtor(&ctor_ret);
++	zval_ptr_dtor(&arr);
++}
++
++/* ---------------- operators ---------------- */
++
++static zend_result pv_do_operation(uint8_t opcode, zval *result, zval *op1, zval *op2)
++{
++	if (opcode == ZEND_ADD
++	 && Z_TYPE_P(op1) == IS_OBJECT && Z_OBJCE_P(op1) == zend_ce_persistent_vector
++	 && Z_TYPE_P(op2) == IS_OBJECT && Z_OBJCE_P(op2) == zend_ce_persistent_vector) {
++		pv_builder b;
++		pv_builder_init(&b);
++		pv_concat_into(&b, Z_PVVEC_P(op1));
++		pv_concat_into(&b, Z_PVVEC_P(op2));
++		pv_make(result, &b.root, b.size, b.shift);
++		return SUCCESS;
++	}
++	return FAILURE;
++}
++
++/* ================= Map (hash-array-mapped trie) ================= */
++
++ZEND_API zend_class_entry *zend_ce_persistent_map;
++
++/* MAP_LEVELS internal trie levels (5 bits each) then a real assoc-array bucket
++ * keyed by the actual key. Fixed depth -> O(1) expected get/set. */
++#define MAP_LEVELS 5
++
++typedef struct {
++	zval        root;   /* IS_ARRAY: trie root */
++	uint32_t    size;
++	zend_object std;
++} pv_map;
++
++static zend_object_handlers pv_map_handlers;
++
++static zend_always_inline pv_map *map_from_obj(zend_object *obj)
++{
++	return (pv_map *)((char *)(obj) - XtOffsetOf(pv_map, std));
++}
++#define Z_PVMAP_P(zv) map_from_obj(Z_OBJ_P(zv))
++
++static zend_object *pv_map_create(zend_class_entry *ce)
++{
++	pv_map *m = zend_object_alloc(sizeof(pv_map), ce);
++	zend_object_std_init(&m->std, ce);
++	object_properties_init(&m->std, ce);
++	ZVAL_ARR(&m->root, zend_new_array(0));
++	m->size = 0;
++	m->std.handlers = &pv_map_handlers;
++	return &m->std;
++}
++
++static void pv_map_free(zend_object *obj)
++{
++	pv_map *m = map_from_obj(obj);
++	zval_ptr_dtor(&m->root);
++	zend_object_std_dtor(&m->std);
++}
++
++static zend_object *pv_map_clone(zend_object *obj)
++{
++	pv_map *src = map_from_obj(obj);
++	zend_object *new_obj = pv_map_create(obj->ce);
++	pv_map *dst = map_from_obj(new_obj);
++	zval_ptr_dtor(&dst->root);
++	ZVAL_COPY(&dst->root, &src->root);
++	dst->size = src->size;
++	return new_obj;
++}
++
++static HashTable *pv_map_get_gc(zend_object *obj, zval **table, int *n)
++{
++	pv_map *m = map_from_obj(obj);
++	*table = &m->root;
++	*n = 1;
++	return NULL;
++}
++
++static void pv_map_make(zval *out, zval *root, uint32_t size)
++{
++	object_init_ex(out, zend_ce_persistent_map);
++	pv_map *m = Z_PVMAP_P(out);
++	zval_ptr_dtor(&m->root);
++	ZVAL_COPY_VALUE(&m->root, root);
++	m->size = size;
++}
++
++static zend_ulong map_key_hash(const zval *key)
++{
++	if (Z_TYPE_P(key) == IS_LONG) {
++		return (zend_ulong) Z_LVAL_P(key);
++	}
++	return zend_string_hash_val(Z_STR_P(key));
++}
++
++static zval *trie_lookup(zend_array *root, const zval *key)
++{
++	zend_ulong h = map_key_hash(key);
++	zend_array *node = root;
++	for (int d = 0; d < MAP_LEVELS; d++) {
++		zval *childz = zend_hash_index_find(node, (h >> (5 * d)) & PV_MASK);
++		if (!childz) {
++			return NULL;
++		}
++		node = Z_ARR_P(childz);
++	}
++	if (Z_TYPE_P(key) == IS_LONG) {
++		return zend_hash_index_find(node, (zend_ulong) Z_LVAL_P(key));
++	}
++	return zend_hash_find(node, Z_STR_P(key));
++}
++
++/* path-copy insert/update; *delta gets +1 if a new key was added */
++static zend_array *map_assoc(zend_array *node, int depth, zend_ulong h, zval *key, zval *val, int *delta)
++{
++	zend_array *copy = node ? zend_array_dup(node) : zend_new_array(0);
++	if (depth == MAP_LEVELS) {
++		bool existed;
++		if (Z_TYPE_P(key) == IS_LONG) {
++			existed = zend_hash_index_exists(copy, (zend_ulong) Z_LVAL_P(key));
++			Z_TRY_ADDREF_P(val);
++			zend_hash_index_update(copy, (zend_ulong) Z_LVAL_P(key), val);
++		} else {
++			existed = zend_hash_exists(copy, Z_STR_P(key));
++			Z_TRY_ADDREF_P(val);
++			zend_hash_update(copy, Z_STR_P(key), val);
++		}
++		if (!existed) {
++			(*delta)++;
++		}
++		return copy;
++	}
++	uint32_t slot = (h >> (5 * depth)) & PV_MASK;
++	zval *childz = node ? zend_hash_index_find(node, slot) : NULL;
++	zend_array *child = childz ? Z_ARR_P(childz) : NULL;
++	zend_array *newchild = map_assoc(child, depth + 1, h, key, val, delta);
++	zval cz;
++	ZVAL_ARR(&cz, newchild);
++	zend_hash_index_update(copy, slot, &cz);
++	return copy;
++}
++
++/* path-copy delete; *delta gets -1 if a key was removed */
++static zend_array *map_dissoc(zend_array *node, int depth, zend_ulong h, const zval *key, int *delta)
++{
++	zend_array *copy = zend_array_dup(node);
++	if (depth == MAP_LEVELS) {
++		zend_result r;
++		if (Z_TYPE_P(key) == IS_LONG) {
++			r = zend_hash_index_del(copy, (zend_ulong) Z_LVAL_P(key));
++		} else {
++			r = zend_hash_del(copy, Z_STR_P(key));
++		}
++		if (r == SUCCESS) {
++			(*delta)--;
++		}
++		return copy;
++	}
++	uint32_t slot = (h >> (5 * depth)) & PV_MASK;
++	zval *childz = zend_hash_index_find(node, slot);
++	if (!childz) {
++		return copy; /* key absent */
++	}
++	zend_array *newchild = map_dissoc(Z_ARR_P(childz), depth + 1, h, key, delta);
++	if (zend_hash_num_elements(newchild) == 0) {
++		zend_array_release(newchild);
++		zend_hash_index_del(copy, slot);
++	} else {
++		zval cz;
++		ZVAL_ARR(&cz, newchild);
++		zend_hash_index_update(copy, slot, &cz);
++	}
++	return copy;
++}
++
++/* walk every bucket, calling cb(key_zval, val) for each entry */
++typedef void (*map_visit_cb)(zval *key, zval *val, void *ctx);
++
++static void map_walk(zend_array *node, int depth, map_visit_cb cb, void *ctx)
++{
++	if (depth == MAP_LEVELS) {
++		zend_string *skey;
++		zend_ulong nkey;
++		zval *val;
++		ZEND_HASH_FOREACH_KEY_VAL(node, nkey, skey, val) {
++			zval k;
++			if (skey) {
++				ZVAL_STR(&k, skey);
++			} else {
++				ZVAL_LONG(&k, (zend_long) nkey);
++			}
++			cb(&k, val, ctx);
++		} ZEND_HASH_FOREACH_END();
++		return;
++	}
++	zval *childz;
++	ZEND_HASH_FOREACH_VAL(node, childz) {
++		map_walk(Z_ARR_P(childz), depth + 1, cb, ctx);
++	} ZEND_HASH_FOREACH_END();
++}
++
++static void map_collect_assoc_cb(zval *key, zval *val, void *ctx)
++{
++	zend_array *out = (zend_array *) ctx;
++	Z_TRY_ADDREF_P(val);
++	if (Z_TYPE_P(key) == IS_LONG) {
++		zend_hash_index_update(out, (zend_ulong) Z_LVAL_P(key), val);
++	} else {
++		zend_hash_update(out, Z_STR_P(key), val);
++	}
++}
++
++static void map_to_assoc(pv_map *m, zval *out)
++{
++	zend_array *arr = zend_new_array(m->size);
++	if (m->size) {
++		map_walk(Z_ARR(m->root), 0, map_collect_assoc_cb, arr);
++	}
++	ZVAL_ARR(out, arr);
++}
++
++/* builder for map/filter/fromArray */
++typedef struct { zval root; uint32_t size; } map_builder;
++
++static void map_builder_init(map_builder *b)
++{
++	ZVAL_ARR(&b->root, zend_new_array(0));
++	b->size = 0;
++}
++
++static void map_builder_set(map_builder *b, zval *key, zval *val)
++{
++	int delta = 0;
++	zend_ulong h = map_key_hash(key);
++	zend_array *newroot = map_assoc(Z_ARR(b->root), 0, h, key, val, &delta);
++	zval_ptr_dtor(&b->root);
++	ZVAL_ARR(&b->root, newroot);
++	b->size += delta;
++}
++
++static void map_load_from_array(map_builder *b, zend_array *arr)
++{
++	zend_string *skey;
++	zend_ulong nkey;
++	zval *val;
++	ZEND_HASH_FOREACH_KEY_VAL(arr, nkey, skey, val) {
++		zval k;
++		if (skey) {
++			ZVAL_STR(&k, skey);
++		} else {
++			ZVAL_LONG(&k, (zend_long) nkey);
++		}
++		ZVAL_DEREF(val);
++		map_builder_set(b, &k, val);
++	} ZEND_HASH_FOREACH_END();
++}
++
++ZEND_METHOD(Map, __construct)
++{
++	zval *entries = NULL;
++	ZEND_PARSE_PARAMETERS_START(0, 1)
++		Z_PARAM_OPTIONAL
++		Z_PARAM_ARRAY(entries)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!entries || zend_hash_num_elements(Z_ARRVAL_P(entries)) == 0) {
++		return;
++	}
++	pv_map *self = Z_PVMAP_P(ZEND_THIS);
++	map_builder b;
++	map_builder_init(&b);
++	map_load_from_array(&b, Z_ARRVAL_P(entries));
++	zval_ptr_dtor(&self->root);
++	ZVAL_COPY_VALUE(&self->root, &b.root);
++	self->size = b.size;
++}
++
++ZEND_METHOD(Map, fromArray)
++{
++	zval *arr;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ARRAY(arr)
++	ZEND_PARSE_PARAMETERS_END();
++	map_builder b;
++	map_builder_init(&b);
++	map_load_from_array(&b, Z_ARRVAL_P(arr));
++	pv_map_make(return_value, &b.root, b.size);
++}
++
++ZEND_METHOD(Map, count)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_LONG(Z_PVMAP_P(ZEND_THIS)->size);
++}
++
++ZEND_METHOD(Map, isEmpty)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(Z_PVMAP_P(ZEND_THIS)->size == 0);
++}
++
++ZEND_METHOD(Map, has)
++{
++	zval *key;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(key)
++	ZEND_PARSE_PARAMETERS_END();
++	if (Z_TYPE_P(key) != IS_LONG && Z_TYPE_P(key) != IS_STRING) {
++		zend_argument_type_error(1, "must be of type string|int");
++		RETURN_THROWS();
++	}
++	RETURN_BOOL(trie_lookup(Z_ARR(Z_PVMAP_P(ZEND_THIS)->root), key) != NULL);
++}
++
++ZEND_METHOD(Map, get)
++{
++	zval *key, *def = NULL;
++	ZEND_PARSE_PARAMETERS_START(1, 2)
++		Z_PARAM_ZVAL(key)
++		Z_PARAM_OPTIONAL
++		Z_PARAM_ZVAL(def)
++	ZEND_PARSE_PARAMETERS_END();
++	if (Z_TYPE_P(key) != IS_LONG && Z_TYPE_P(key) != IS_STRING) {
++		zend_argument_type_error(1, "must be of type string|int");
++		RETURN_THROWS();
++	}
++	zval *found = trie_lookup(Z_ARR(Z_PVMAP_P(ZEND_THIS)->root), key);
++	if (found) {
++		RETURN_COPY_DEREF(found);
++	}
++	if (def) {
++		RETURN_COPY(def);
++	}
++	RETURN_NULL();
++}
++
++ZEND_METHOD(Map, set)
++{
++	zval *key, *val;
++	ZEND_PARSE_PARAMETERS_START(2, 2)
++		Z_PARAM_ZVAL(key)
++		Z_PARAM_ZVAL(val)
++	ZEND_PARSE_PARAMETERS_END();
++	if (Z_TYPE_P(key) != IS_LONG && Z_TYPE_P(key) != IS_STRING) {
++		zend_argument_type_error(1, "must be of type string|int");
++		RETURN_THROWS();
++	}
++	pv_map *m = Z_PVMAP_P(ZEND_THIS);
++	int delta = 0;
++	zend_array *newroot = map_assoc(Z_ARR(m->root), 0, map_key_hash(key), key, val, &delta);
++	zval rootz;
++	ZVAL_ARR(&rootz, newroot);
++	pv_map_make(return_value, &rootz, m->size + delta);
++}
++
++ZEND_METHOD(Map, remove)
++{
++	zval *key;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(key)
++	ZEND_PARSE_PARAMETERS_END();
++	if (Z_TYPE_P(key) != IS_LONG && Z_TYPE_P(key) != IS_STRING) {
++		zend_argument_type_error(1, "must be of type string|int");
++		RETURN_THROWS();
++	}
++	pv_map *m = Z_PVMAP_P(ZEND_THIS);
++	int delta = 0;
++	zend_array *newroot = map_dissoc(Z_ARR(m->root), 0, map_key_hash(key), key, &delta);
++	zval rootz;
++	ZVAL_ARR(&rootz, newroot);
++	pv_map_make(return_value, &rootz, m->size + delta);
++}
++
++static void map_collect_keys_cb(zval *key, zval *val, void *ctx)
++{
++	(void) val;
++	zval k;
++	ZVAL_COPY(&k, key);
++	zend_hash_next_index_insert((zend_array *) ctx, &k);
++}
++
++static void map_collect_values_cb(zval *key, zval *val, void *ctx)
++{
++	(void) key;
++	Z_TRY_ADDREF_P(val);
++	zend_hash_next_index_insert((zend_array *) ctx, val);
++}
++
++ZEND_METHOD(Map, keys)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_map *m = Z_PVMAP_P(ZEND_THIS);
++	zend_array *out = zend_new_array(m->size);
++	if (m->size) {
++		map_walk(Z_ARR(m->root), 0, map_collect_keys_cb, out);
++	}
++	RETURN_ARR(out);
++}
++
++ZEND_METHOD(Map, values)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_map *m = Z_PVMAP_P(ZEND_THIS);
++	zend_array *out = zend_new_array(m->size);
++	if (m->size) {
++		map_walk(Z_ARR(m->root), 0, map_collect_values_cb, out);
++	}
++	RETURN_ARR(out);
++}
++
++ZEND_METHOD(Map, toArray)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	map_to_assoc(Z_PVMAP_P(ZEND_THIS), return_value);
++}
++
++ZEND_METHOD(Map, map)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_map *m = Z_PVMAP_P(ZEND_THIS);
++	zval assoc;
++	map_to_assoc(m, &assoc);
++
++	map_builder b;
++	map_builder_init(&b);
++	zend_string *skey;
++	zend_ulong nkey;
++	zval *val;
++	ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(assoc), nkey, skey, val) {
++		zval k, ret, args[2];
++		if (skey) { ZVAL_STR(&k, skey); } else { ZVAL_LONG(&k, (zend_long) nkey); }
++		ZVAL_COPY(&args[0], val);
++		ZVAL_COPY(&args[1], &k);
++		fci.param_count = 2;
++		fci.params = args;
++		fci.retval = &ret;
++		fci.named_params = NULL;
++		zend_result r = zend_call_function(&fci, &fcc);
++		zval_ptr_dtor(&args[0]);
++		zval_ptr_dtor(&args[1]);
++		if (r == SUCCESS && !EG(exception)) {
++			map_builder_set(&b, &k, &ret);
++		}
++		zval_ptr_dtor(&ret);
++		if (EG(exception)) { break; }
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&assoc);
++	if (EG(exception)) { zval_ptr_dtor(&b.root); RETURN_THROWS(); }
++	pv_map_make(return_value, &b.root, b.size);
++}
++
++ZEND_METHOD(Map, filter)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_map *m = Z_PVMAP_P(ZEND_THIS);
++	zval assoc;
++	map_to_assoc(m, &assoc);
++
++	map_builder b;
++	map_builder_init(&b);
++	zend_string *skey;
++	zend_ulong nkey;
++	zval *val;
++	ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(assoc), nkey, skey, val) {
++		zval k, ret, args[2];
++		if (skey) { ZVAL_STR(&k, skey); } else { ZVAL_LONG(&k, (zend_long) nkey); }
++		ZVAL_COPY(&args[0], val);
++		ZVAL_COPY(&args[1], &k);
++		fci.param_count = 2;
++		fci.params = args;
++		fci.retval = &ret;
++		fci.named_params = NULL;
++		zend_result r = zend_call_function(&fci, &fcc);
++		zval_ptr_dtor(&args[0]);
++		zval_ptr_dtor(&args[1]);
++		if (r == SUCCESS && !EG(exception) && zend_is_true(&ret)) {
++			map_builder_set(&b, &k, val);
++		}
++		zval_ptr_dtor(&ret);
++		if (EG(exception)) { break; }
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&assoc);
++	if (EG(exception)) { zval_ptr_dtor(&b.root); RETURN_THROWS(); }
++	pv_map_make(return_value, &b.root, b.size);
++}
++
++typedef struct { smart_str *buf; bool first; } map_str_ctx;
++
++static void map_tostring_cb(zval *key, zval *val, void *ctx)
++{
++	map_str_ctx *c = (map_str_ctx *) ctx;
++	if (!c->first) smart_str_appends(c->buf, ", ");
++	c->first = false;
++	pv_append_scalar(c->buf, key);
++	smart_str_appends(c->buf, " => ");
++	pv_append_scalar(c->buf, val);
++}
++
++ZEND_METHOD(Map, __toString)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_map *m = Z_PVMAP_P(ZEND_THIS);
++	smart_str buf = {0};
++	smart_str_appends(&buf, "Map(");
++	map_str_ctx ctx = { &buf, true };
++	if (m->size) {
++		map_walk(Z_ARR(m->root), 0, map_tostring_cb, &ctx);
++	}
++	smart_str_appendc(&buf, ')');
++	smart_str_0(&buf);
++	RETURN_STR(smart_str_extract(&buf));
++}
++
++ZEND_METHOD(Map, getIterator)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	zval arr;
++	map_to_assoc(Z_PVMAP_P(ZEND_THIS), &arr);
++	zend_string *name = zend_string_init("ArrayIterator", sizeof("ArrayIterator") - 1, 0);
++	zend_class_entry *ce_it = zend_lookup_class(name);
++	zend_string_release(name);
++	if (!ce_it) {
++		zval_ptr_dtor(&arr);
++		zend_throw_error(NULL, "ArrayIterator is not available");
++		RETURN_THROWS();
++	}
++	object_init_ex(return_value, ce_it);
++	zval ctor_ret;
++	ZVAL_UNDEF(&ctor_ret);
++	zend_call_known_instance_method_with_1_params(ce_it->constructor, Z_OBJ_P(return_value), &ctor_ret, &arr);
++	zval_ptr_dtor(&ctor_ret);
++	zval_ptr_dtor(&arr);
++}
++
++/* ================= Set (HAMT of unique members) ================= */
++
++ZEND_API zend_class_entry *zend_ce_persistent_set;
++
++typedef struct {
++	zval        root;   /* IS_ARRAY: trie root, member stored as both key and value */
++	uint32_t    size;
++	zend_object std;
++} pv_set;
++
++static zend_object_handlers pv_set_handlers;
++
++static zend_always_inline pv_set *set_from_obj(zend_object *obj)
++{
++	return (pv_set *)((char *)(obj) - XtOffsetOf(pv_set, std));
++}
++#define Z_PVSET_P(zv) set_from_obj(Z_OBJ_P(zv))
++
++static zend_object *pv_set_create(zend_class_entry *ce)
++{
++	pv_set *s = zend_object_alloc(sizeof(pv_set), ce);
++	zend_object_std_init(&s->std, ce);
++	object_properties_init(&s->std, ce);
++	ZVAL_ARR(&s->root, zend_new_array(0));
++	s->size = 0;
++	s->std.handlers = &pv_set_handlers;
++	return &s->std;
++}
++
++static void pv_set_free(zend_object *obj)
++{
++	pv_set *s = set_from_obj(obj);
++	zval_ptr_dtor(&s->root);
++	zend_object_std_dtor(&s->std);
++}
++
++static zend_object *pv_set_clone(zend_object *obj)
++{
++	pv_set *src = set_from_obj(obj);
++	zend_object *new_obj = pv_set_create(obj->ce);
++	pv_set *dst = set_from_obj(new_obj);
++	zval_ptr_dtor(&dst->root);
++	ZVAL_COPY(&dst->root, &src->root);
++	dst->size = src->size;
++	return new_obj;
++}
++
++static HashTable *pv_set_get_gc(zend_object *obj, zval **table, int *n)
++{
++	pv_set *s = set_from_obj(obj);
++	*table = &s->root;
++	*n = 1;
++	return NULL;
++}
++
++static void pv_set_make(zval *out, zval *root, uint32_t size)
++{
++	object_init_ex(out, zend_ce_persistent_set);
++	pv_set *s = Z_PVSET_P(out);
++	zval_ptr_dtor(&s->root);
++	ZVAL_COPY_VALUE(&s->root, root);
++	s->size = size;
++}
++
++static bool set_valid_member(const zval *m)
++{
++	return Z_TYPE_P(m) == IS_LONG || Z_TYPE_P(m) == IS_STRING;
++}
++
++/* builder: stores each member as both key and value in the HAMT */
++typedef struct { zval root; uint32_t size; } set_builder;
++
++static void set_builder_init(set_builder *b)
++{
++	ZVAL_ARR(&b->root, zend_new_array(0));
++	b->size = 0;
++}
++
++static void set_builder_add(set_builder *b, zval *member)
++{
++	int delta = 0;
++	zend_array *newroot = map_assoc(Z_ARR(b->root), 0, map_key_hash(member), member, member, &delta);
++	zval_ptr_dtor(&b->root);
++	ZVAL_ARR(&b->root, newroot);
++	b->size += delta;
++}
++
++static void set_collect_cb(zval *key, zval *val, void *ctx)
++{
++	(void) key;
++	Z_TRY_ADDREF_P(val);
++	zend_hash_next_index_insert((zend_array *) ctx, val);
++}
++
++static void set_to_list(pv_set *s, zval *out)
++{
++	zend_array *arr = zend_new_array(s->size);
++	if (s->size) {
++		map_walk(Z_ARR(s->root), 0, set_collect_cb, arr);
++	}
++	ZVAL_ARR(out, arr);
++}
++
++ZEND_METHOD(Set, __construct)
++{
++	zval *members = NULL;
++	ZEND_PARSE_PARAMETERS_START(0, 1)
++		Z_PARAM_OPTIONAL
++		Z_PARAM_ARRAY(members)
++	ZEND_PARSE_PARAMETERS_END();
++
++	if (!members || zend_hash_num_elements(Z_ARRVAL_P(members)) == 0) {
++		return;
++	}
++	pv_set *self = Z_PVSET_P(ZEND_THIS);
++	set_builder b;
++	set_builder_init(&b);
++	zval *m;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(members), m) {
++		ZVAL_DEREF(m);
++		if (!set_valid_member(m)) {
++			zval_ptr_dtor(&b.root);
++			zend_argument_type_error(1, "must contain only string|int members");
++			RETURN_THROWS();
++		}
++		set_builder_add(&b, m);
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&self->root);
++	ZVAL_COPY_VALUE(&self->root, &b.root);
++	self->size = b.size;
++}
++
++ZEND_METHOD(Set, of)
++{
++	zval *args;
++	uint32_t argc;
++	ZEND_PARSE_PARAMETERS_START(0, -1)
++		Z_PARAM_VARIADIC('+', args, argc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	set_builder b;
++	set_builder_init(&b);
++	for (uint32_t i = 0; i < argc; i++) {
++		if (!set_valid_member(&args[i])) {
++			zval_ptr_dtor(&b.root);
++			zend_argument_type_error(i + 1, "must be of type string|int");
++			RETURN_THROWS();
++		}
++		set_builder_add(&b, &args[i]);
++	}
++	pv_set_make(return_value, &b.root, b.size);
++}
++
++ZEND_METHOD(Set, fromArray)
++{
++	zval *arr;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ARRAY(arr)
++	ZEND_PARSE_PARAMETERS_END();
++	set_builder b;
++	set_builder_init(&b);
++	zval *m;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(arr), m) {
++		ZVAL_DEREF(m);
++		if (!set_valid_member(m)) {
++			zval_ptr_dtor(&b.root);
++			zend_argument_type_error(1, "must contain only string|int members");
++			RETURN_THROWS();
++		}
++		set_builder_add(&b, m);
++	} ZEND_HASH_FOREACH_END();
++	pv_set_make(return_value, &b.root, b.size);
++}
++
++ZEND_METHOD(Set, count)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_LONG(Z_PVSET_P(ZEND_THIS)->size);
++}
++
++ZEND_METHOD(Set, isEmpty)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	RETURN_BOOL(Z_PVSET_P(ZEND_THIS)->size == 0);
++}
++
++ZEND_METHOD(Set, has)
++{
++	zval *m;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(m)
++	ZEND_PARSE_PARAMETERS_END();
++	if (!set_valid_member(m)) {
++		zend_argument_type_error(1, "must be of type string|int");
++		RETURN_THROWS();
++	}
++	RETURN_BOOL(trie_lookup(Z_ARR(Z_PVSET_P(ZEND_THIS)->root), m) != NULL);
++}
++
++ZEND_METHOD(Set, add)
++{
++	zval *m;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(m)
++	ZEND_PARSE_PARAMETERS_END();
++	if (!set_valid_member(m)) {
++		zend_argument_type_error(1, "must be of type string|int");
++		RETURN_THROWS();
++	}
++	pv_set *s = Z_PVSET_P(ZEND_THIS);
++	int delta = 0;
++	zend_array *newroot = map_assoc(Z_ARR(s->root), 0, map_key_hash(m), m, m, &delta);
++	zval rootz;
++	ZVAL_ARR(&rootz, newroot);
++	pv_set_make(return_value, &rootz, s->size + delta);
++}
++
++ZEND_METHOD(Set, remove)
++{
++	zval *m;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(m)
++	ZEND_PARSE_PARAMETERS_END();
++	if (!set_valid_member(m)) {
++		zend_argument_type_error(1, "must be of type string|int");
++		RETURN_THROWS();
++	}
++	pv_set *s = Z_PVSET_P(ZEND_THIS);
++	int delta = 0;
++	zend_array *newroot = map_dissoc(Z_ARR(s->root), 0, map_key_hash(m), m, &delta);
++	zval rootz;
++	ZVAL_ARR(&rootz, newroot);
++	pv_set_make(return_value, &rootz, s->size + delta);
++}
++
++/* add every member of `s` into builder `b` */
++static void set_add_all(set_builder *b, pv_set *s)
++{
++	if (s->size == 0) {
++		return;
++	}
++	zval list;
++	set_to_list(s, &list);
++	zval *m;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL(list), m) {
++		set_builder_add(b, m);
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&list);
++}
++
++static void set_union(zval *out, pv_set *a, pv_set *b)
++{
++	set_builder bld;
++	set_builder_init(&bld);
++	set_add_all(&bld, a);
++	set_add_all(&bld, b);
++	pv_set_make(out, &bld.root, bld.size);
++}
++
++static void set_intersect(zval *out, pv_set *a, pv_set *b)
++{
++	set_builder bld;
++	set_builder_init(&bld);
++	if (a->size) {
++		zval list;
++		set_to_list(a, &list);
++		zval *m;
++		ZEND_HASH_FOREACH_VAL(Z_ARRVAL(list), m) {
++			if (trie_lookup(Z_ARR(b->root), m)) {
++				set_builder_add(&bld, m);
++			}
++		} ZEND_HASH_FOREACH_END();
++		zval_ptr_dtor(&list);
++	}
++	pv_set_make(out, &bld.root, bld.size);
++}
++
++static void set_diff(zval *out, pv_set *a, pv_set *b)
++{
++	set_builder bld;
++	set_builder_init(&bld);
++	if (a->size) {
++		zval list;
++		set_to_list(a, &list);
++		zval *m;
++		ZEND_HASH_FOREACH_VAL(Z_ARRVAL(list), m) {
++			if (!trie_lookup(Z_ARR(b->root), m)) {
++				set_builder_add(&bld, m);
++			}
++		} ZEND_HASH_FOREACH_END();
++		zval_ptr_dtor(&list);
++	}
++	pv_set_make(out, &bld.root, bld.size);
++}
++
++ZEND_METHOD(Set, union)
++{
++	zval *other;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_OBJECT_OF_CLASS(other, zend_ce_persistent_set)
++	ZEND_PARSE_PARAMETERS_END();
++	set_union(return_value, Z_PVSET_P(ZEND_THIS), Z_PVSET_P(other));
++}
++
++ZEND_METHOD(Set, intersect)
++{
++	zval *other;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_OBJECT_OF_CLASS(other, zend_ce_persistent_set)
++	ZEND_PARSE_PARAMETERS_END();
++	set_intersect(return_value, Z_PVSET_P(ZEND_THIS), Z_PVSET_P(other));
++}
++
++ZEND_METHOD(Set, diff)
++{
++	zval *other;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_OBJECT_OF_CLASS(other, zend_ce_persistent_set)
++	ZEND_PARSE_PARAMETERS_END();
++	set_diff(return_value, Z_PVSET_P(ZEND_THIS), Z_PVSET_P(other));
++}
++
++ZEND_METHOD(Set, map)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_set *s = Z_PVSET_P(ZEND_THIS);
++	zval list;
++	set_to_list(s, &list);
++	set_builder b;
++	set_builder_init(&b);
++	zval *m;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL(list), m) {
++		zval ret, arg;
++		ZVAL_COPY(&arg, m);
++		fci.param_count = 1;
++		fci.params = &arg;
++		fci.retval = &ret;
++		fci.named_params = NULL;
++		zend_result r = zend_call_function(&fci, &fcc);
++		zval_ptr_dtor(&arg);
++		if (r == SUCCESS && !EG(exception)) {
++			if (set_valid_member(&ret)) {
++				set_builder_add(&b, &ret);
++			} else {
++				zval_ptr_dtor(&ret);
++				zval_ptr_dtor(&list);
++				zval_ptr_dtor(&b.root);
++				zend_throw_error(NULL, "Set::map() callback must return a string or int");
++				RETURN_THROWS();
++			}
++		}
++		zval_ptr_dtor(&ret);
++		if (EG(exception)) { break; }
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&list);
++	if (EG(exception)) { zval_ptr_dtor(&b.root); RETURN_THROWS(); }
++	pv_set_make(return_value, &b.root, b.size);
++}
++
++ZEND_METHOD(Set, filter)
++{
++	zend_fcall_info fci;
++	zend_fcall_info_cache fcc;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_FUNC(fci, fcc)
++	ZEND_PARSE_PARAMETERS_END();
++
++	pv_set *s = Z_PVSET_P(ZEND_THIS);
++	zval list;
++	set_to_list(s, &list);
++	set_builder b;
++	set_builder_init(&b);
++	zval *m;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL(list), m) {
++		zval ret, arg;
++		ZVAL_COPY(&arg, m);
++		fci.param_count = 1;
++		fci.params = &arg;
++		fci.retval = &ret;
++		fci.named_params = NULL;
++		zend_result r = zend_call_function(&fci, &fcc);
++		zval_ptr_dtor(&arg);
++		if (r == SUCCESS && !EG(exception) && zend_is_true(&ret)) {
++			set_builder_add(&b, m);
++		}
++		zval_ptr_dtor(&ret);
++		if (EG(exception)) { break; }
++	} ZEND_HASH_FOREACH_END();
++	zval_ptr_dtor(&list);
++	if (EG(exception)) { zval_ptr_dtor(&b.root); RETURN_THROWS(); }
++	pv_set_make(return_value, &b.root, b.size);
++}
++
++ZEND_METHOD(Set, toArray)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	set_to_list(Z_PVSET_P(ZEND_THIS), return_value);
++}
++
++ZEND_METHOD(Set, __toString)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	pv_set *s = Z_PVSET_P(ZEND_THIS);
++	smart_str buf = {0};
++	smart_str_appends(&buf, "Set(");
++	if (s->size) {
++		zval list;
++		set_to_list(s, &list);
++		bool first = true;
++		zval *m;
++		ZEND_HASH_FOREACH_VAL(Z_ARRVAL(list), m) {
++			if (!first) smart_str_appends(&buf, ", ");
++			first = false;
++			pv_append_scalar(&buf, m);
++		} ZEND_HASH_FOREACH_END();
++		zval_ptr_dtor(&list);
++	}
++	smart_str_appendc(&buf, ')');
++	smart_str_0(&buf);
++	RETURN_STR(smart_str_extract(&buf));
++}
++
++ZEND_METHOD(Set, getIterator)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	zval arr;
++	set_to_list(Z_PVSET_P(ZEND_THIS), &arr);
++	zend_string *name = zend_string_init("ArrayIterator", sizeof("ArrayIterator") - 1, 0);
++	zend_class_entry *ce_it = zend_lookup_class(name);
++	zend_string_release(name);
++	if (!ce_it) {
++		zval_ptr_dtor(&arr);
++		zend_throw_error(NULL, "ArrayIterator is not available");
++		RETURN_THROWS();
++	}
++	object_init_ex(return_value, ce_it);
++	zval ctor_ret;
++	ZVAL_UNDEF(&ctor_ret);
++	zend_call_known_instance_method_with_1_params(ce_it->constructor, Z_OBJ_P(return_value), &ctor_ret, &arr);
++	zval_ptr_dtor(&ctor_ret);
++	zval_ptr_dtor(&arr);
++}
++
++static zend_result pv_set_do_operation(uint8_t opcode, zval *result, zval *op1, zval *op2)
++{
++	if (Z_TYPE_P(op1) == IS_OBJECT && Z_OBJCE_P(op1) == zend_ce_persistent_set
++	 && Z_TYPE_P(op2) == IS_OBJECT && Z_OBJCE_P(op2) == zend_ce_persistent_set) {
++		pv_set *a = Z_PVSET_P(op1), *b = Z_PVSET_P(op2);
++		switch (opcode) {
++			case ZEND_BW_OR:  set_union(result, a, b);     return SUCCESS;
++			case ZEND_BW_AND: set_intersect(result, a, b); return SUCCESS;
++			case ZEND_SUB:    set_diff(result, a, b);      return SUCCESS;
++			default: break;
++		}
++	}
++	return FAILURE;
++}
++
++/* ---------------- registration ---------------- */
++
++void zend_register_persistent(void)
++{
++	zend_ce_persistent_vector = register_class_Vector(
++		zend_ce_aggregate, zend_ce_countable, zend_ce_stringable);
++	zend_ce_persistent_vector->create_object = pv_vector_create;
++
++	memcpy(&pv_vector_handlers, &std_object_handlers, sizeof(zend_object_handlers));
++	pv_vector_handlers.offset = XtOffsetOf(pv_vector, std);
++	pv_vector_handlers.free_obj = pv_vector_free;
++	pv_vector_handlers.clone_obj = pv_vector_clone;
++	pv_vector_handlers.get_gc = pv_vector_get_gc;
++	pv_vector_handlers.do_operation = pv_do_operation;
++
++	zend_ce_persistent_map = register_class_Map(
++		zend_ce_aggregate, zend_ce_countable, zend_ce_stringable);
++	zend_ce_persistent_map->create_object = pv_map_create;
++
++	memcpy(&pv_map_handlers, &std_object_handlers, sizeof(zend_object_handlers));
++	pv_map_handlers.offset = XtOffsetOf(pv_map, std);
++	pv_map_handlers.free_obj = pv_map_free;
++	pv_map_handlers.clone_obj = pv_map_clone;
++	pv_map_handlers.get_gc = pv_map_get_gc;
++
++	zend_ce_persistent_set = register_class_Set(
++		zend_ce_aggregate, zend_ce_countable, zend_ce_stringable);
++	zend_ce_persistent_set->create_object = pv_set_create;
++
++	memcpy(&pv_set_handlers, &std_object_handlers, sizeof(zend_object_handlers));
++	pv_set_handlers.offset = XtOffsetOf(pv_set, std);
++	pv_set_handlers.free_obj = pv_set_free;
++	pv_set_handlers.clone_obj = pv_set_clone;
++	pv_set_handlers.get_gc = pv_set_get_gc;
++	pv_set_handlers.do_operation = pv_set_do_operation;
++}
+diff --git a/Zend/zend_persistent.h b/Zend/zend_persistent.h
+new file mode 100644
+index 00000000..d0639ab4
+--- /dev/null
++++ b/Zend/zend_persistent.h
+@@ -0,0 +1,23 @@
++/*
++   +----------------------------------------------------------------------+
++   | Built-in persistent (immutable, structurally-shared) collections:    |
++   | Vector / Map / Set.                                                   |
++   +----------------------------------------------------------------------+
++*/
++
++#ifndef ZEND_PERSISTENT_H
++#define ZEND_PERSISTENT_H
++
++#include "zend.h"
++
++BEGIN_EXTERN_C()
++
++extern ZEND_API zend_class_entry *zend_ce_persistent_vector;
++extern ZEND_API zend_class_entry *zend_ce_persistent_map;
++extern ZEND_API zend_class_entry *zend_ce_persistent_set;
++
++void zend_register_persistent(void);
++
++END_EXTERN_C()
++
++#endif /* ZEND_PERSISTENT_H */
+diff --git a/Zend/zend_persistent.stub.php b/Zend/zend_persistent.stub.php
+new file mode 100644
+index 00000000..3300b0b2
+--- /dev/null
++++ b/Zend/zend_persistent.stub.php
+@@ -0,0 +1,96 @@
++<?php
++
++/** @generate-class-entries */
++
++/**
++ * An immutable, persistent ordered sequence backed by a bit-partitioned trie
++ * (branching factor 32). Every "mutation" returns a new Vector that shares
++ * structure with the original, so updates are O(log32 n) and the original is
++ * never changed.
++ */
++final class Vector implements IteratorAggregate, Countable, Stringable
++{
++    public function __construct(array $values = []) {}
++    public static function of(mixed ...$values): Vector {}
++    public static function fromArray(array $values): Vector {}
++
++    public function count(): int {}
++    public function isEmpty(): bool {}
++    public function get(int $index): mixed {}
++    public function first(): mixed {}
++    public function last(): mixed {}
++
++    public function push(mixed $value): Vector {}
++    public function pop(): Vector {}
++    public function set(int $index, mixed $value): Vector {}
++
++    public function map(callable $fn): Vector {}
++    public function filter(callable $fn): Vector {}
++    public function reduce(callable $fn, mixed $initial = null): mixed {}
++    public function slice(int $offset, ?int $length = null): Vector {}
++    public function concat(Vector $other): Vector {}
++
++    public function toArray(): array {}
++    public function getIterator(): Iterator {}
++    public function __toString(): string {}
++}
++
++/**
++ * An immutable, persistent key/value map backed by a hash-array-mapped trie
++ * (HAMT). Keys are int or string. Every "mutation" returns a new Map that shares
++ * structure with the original (O(1) expected updates). Iteration order is the
++ * trie's hash order, not insertion order.
++ */
++final class Map implements IteratorAggregate, Countable, Stringable
++{
++    public function __construct(array $entries = []) {}
++    public static function fromArray(array $entries): Map {}
++
++    public function count(): int {}
++    public function isEmpty(): bool {}
++    public function has(string|int $key): bool {}
++    public function get(string|int $key, mixed $default = null): mixed {}
++
++    public function set(string|int $key, mixed $value): Map {}
++    public function remove(string|int $key): Map {}
++
++    public function keys(): array {}
++    public function values(): array {}
++    public function map(callable $fn): Map {}
++    public function filter(callable $fn): Map {}
++
++    public function toArray(): array {}
++    public function getIterator(): Iterator {}
++    public function __toString(): string {}
++}
++
++/**
++ * An immutable, persistent set of unique int/string members backed by the same
++ * HAMT as Map. Every "mutation" returns a new Set sharing structure with the
++ * original. The `|`, `&` and `-` operators are union, intersection and
++ * difference. Iteration order is the trie's hash order.
++ */
++final class Set implements IteratorAggregate, Countable, Stringable
++{
++    public function __construct(array $members = []) {}
++    public static function of(mixed ...$members): Set {}
++    public static function fromArray(array $members): Set {}
++
++    public function count(): int {}
++    public function isEmpty(): bool {}
++    public function has(string|int $member): bool {}
++
++    public function add(string|int $member): Set {}
++    public function remove(string|int $member): Set {}
++
++    public function union(Set $other): Set {}
++    public function intersect(Set $other): Set {}
++    public function diff(Set $other): Set {}
++
++    public function map(callable $fn): Set {}
++    public function filter(callable $fn): Set {}
++
++    public function toArray(): array {}
++    public function getIterator(): Iterator {}
++    public function __toString(): string {}
++}
+diff --git a/Zend/zend_persistent_arginfo.h b/Zend/zend_persistent_arginfo.h
+new file mode 100644
+index 00000000..ae7bb5e8
+--- /dev/null
++++ b/Zend/zend_persistent_arginfo.h
+@@ -0,0 +1,308 @@
++/* This is a generated file, edit the .stub.php file instead.
++ * Stub hash: 859825276a265d443829fe9e6e33cb2e1b0bd8f7 */
++
++ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Vector___construct, 0, 0, 0)
++	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, values, IS_ARRAY, 0, "[]")
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_of, 0, 0, Vector, 0)
++	ZEND_ARG_VARIADIC_TYPE_INFO(0, values, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_fromArray, 0, 1, Vector, 0)
++	ZEND_ARG_TYPE_INFO(0, values, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Vector_count, 0, 0, IS_LONG, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Vector_isEmpty, 0, 0, _IS_BOOL, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Vector_get, 0, 1, IS_MIXED, 0)
++	ZEND_ARG_TYPE_INFO(0, index, IS_LONG, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Vector_first, 0, 0, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Vector_last arginfo_class_Vector_first
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_push, 0, 1, Vector, 0)
++	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_pop, 0, 0, Vector, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_set, 0, 2, Vector, 0)
++	ZEND_ARG_TYPE_INFO(0, index, IS_LONG, 0)
++	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_map, 0, 1, Vector, 0)
++	ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Vector_filter arginfo_class_Vector_map
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Vector_reduce, 0, 1, IS_MIXED, 0)
++	ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
++	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, initial, IS_MIXED, 0, "null")
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_slice, 0, 1, Vector, 0)
++	ZEND_ARG_TYPE_INFO(0, offset, IS_LONG, 0)
++	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, length, IS_LONG, 1, "null")
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_concat, 0, 1, Vector, 0)
++	ZEND_ARG_OBJ_INFO(0, other, Vector, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Vector_toArray, 0, 0, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Vector_getIterator, 0, 0, Iterator, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Vector___toString, 0, 0, IS_STRING, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Map___construct, 0, 0, 0)
++	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, entries, IS_ARRAY, 0, "[]")
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Map_fromArray, 0, 1, Map, 0)
++	ZEND_ARG_TYPE_INFO(0, entries, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Map_count arginfo_class_Vector_count
++
++#define arginfo_class_Map_isEmpty arginfo_class_Vector_isEmpty
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Map_has, 0, 1, _IS_BOOL, 0)
++	ZEND_ARG_TYPE_MASK(0, key, MAY_BE_STRING|MAY_BE_LONG, NULL)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Map_get, 0, 1, IS_MIXED, 0)
++	ZEND_ARG_TYPE_MASK(0, key, MAY_BE_STRING|MAY_BE_LONG, NULL)
++	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, default, IS_MIXED, 0, "null")
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Map_set, 0, 2, Map, 0)
++	ZEND_ARG_TYPE_MASK(0, key, MAY_BE_STRING|MAY_BE_LONG, NULL)
++	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Map_remove, 0, 1, Map, 0)
++	ZEND_ARG_TYPE_MASK(0, key, MAY_BE_STRING|MAY_BE_LONG, NULL)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Map_keys arginfo_class_Vector_toArray
++
++#define arginfo_class_Map_values arginfo_class_Vector_toArray
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Map_map, 0, 1, Map, 0)
++	ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Map_filter arginfo_class_Map_map
++
++#define arginfo_class_Map_toArray arginfo_class_Vector_toArray
++
++#define arginfo_class_Map_getIterator arginfo_class_Vector_getIterator
++
++#define arginfo_class_Map___toString arginfo_class_Vector___toString
++
++ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Set___construct, 0, 0, 0)
++	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, members, IS_ARRAY, 0, "[]")
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Set_of, 0, 0, Set, 0)
++	ZEND_ARG_VARIADIC_TYPE_INFO(0, members, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Set_fromArray, 0, 1, Set, 0)
++	ZEND_ARG_TYPE_INFO(0, members, IS_ARRAY, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Set_count arginfo_class_Vector_count
++
++#define arginfo_class_Set_isEmpty arginfo_class_Vector_isEmpty
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Set_has, 0, 1, _IS_BOOL, 0)
++	ZEND_ARG_TYPE_MASK(0, member, MAY_BE_STRING|MAY_BE_LONG, NULL)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Set_add, 0, 1, Set, 0)
++	ZEND_ARG_TYPE_MASK(0, member, MAY_BE_STRING|MAY_BE_LONG, NULL)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Set_remove arginfo_class_Set_add
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Set_union, 0, 1, Set, 0)
++	ZEND_ARG_OBJ_INFO(0, other, Set, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Set_intersect arginfo_class_Set_union
++
++#define arginfo_class_Set_diff arginfo_class_Set_union
++
++ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Set_map, 0, 1, Set, 0)
++	ZEND_ARG_TYPE_INFO(0, fn, IS_CALLABLE, 0)
++ZEND_END_ARG_INFO()
++
++#define arginfo_class_Set_filter arginfo_class_Set_map
++
++#define arginfo_class_Set_toArray arginfo_class_Vector_toArray
++
++#define arginfo_class_Set_getIterator arginfo_class_Vector_getIterator
++
++#define arginfo_class_Set___toString arginfo_class_Vector___toString
++
++ZEND_METHOD(Vector, __construct);
++ZEND_METHOD(Vector, of);
++ZEND_METHOD(Vector, fromArray);
++ZEND_METHOD(Vector, count);
++ZEND_METHOD(Vector, isEmpty);
++ZEND_METHOD(Vector, get);
++ZEND_METHOD(Vector, first);
++ZEND_METHOD(Vector, last);
++ZEND_METHOD(Vector, push);
++ZEND_METHOD(Vector, pop);
++ZEND_METHOD(Vector, set);
++ZEND_METHOD(Vector, map);
++ZEND_METHOD(Vector, filter);
++ZEND_METHOD(Vector, reduce);
++ZEND_METHOD(Vector, slice);
++ZEND_METHOD(Vector, concat);
++ZEND_METHOD(Vector, toArray);
++ZEND_METHOD(Vector, getIterator);
++ZEND_METHOD(Vector, __toString);
++ZEND_METHOD(Map, __construct);
++ZEND_METHOD(Map, fromArray);
++ZEND_METHOD(Map, count);
++ZEND_METHOD(Map, isEmpty);
++ZEND_METHOD(Map, has);
++ZEND_METHOD(Map, get);
++ZEND_METHOD(Map, set);
++ZEND_METHOD(Map, remove);
++ZEND_METHOD(Map, keys);
++ZEND_METHOD(Map, values);
++ZEND_METHOD(Map, map);
++ZEND_METHOD(Map, filter);
++ZEND_METHOD(Map, toArray);
++ZEND_METHOD(Map, getIterator);
++ZEND_METHOD(Map, __toString);
++ZEND_METHOD(Set, __construct);
++ZEND_METHOD(Set, of);
++ZEND_METHOD(Set, fromArray);
++ZEND_METHOD(Set, count);
++ZEND_METHOD(Set, isEmpty);
++ZEND_METHOD(Set, has);
++ZEND_METHOD(Set, add);
++ZEND_METHOD(Set, remove);
++ZEND_METHOD(Set, union);
++ZEND_METHOD(Set, intersect);
++ZEND_METHOD(Set, diff);
++ZEND_METHOD(Set, map);
++ZEND_METHOD(Set, filter);
++ZEND_METHOD(Set, toArray);
++ZEND_METHOD(Set, getIterator);
++ZEND_METHOD(Set, __toString);
++
++static const zend_function_entry class_Vector_methods[] = {
++	ZEND_ME(Vector, __construct, arginfo_class_Vector___construct, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, of, arginfo_class_Vector_of, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
++	ZEND_ME(Vector, fromArray, arginfo_class_Vector_fromArray, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
++	ZEND_ME(Vector, count, arginfo_class_Vector_count, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, isEmpty, arginfo_class_Vector_isEmpty, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, get, arginfo_class_Vector_get, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, first, arginfo_class_Vector_first, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, last, arginfo_class_Vector_last, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, push, arginfo_class_Vector_push, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, pop, arginfo_class_Vector_pop, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, set, arginfo_class_Vector_set, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, map, arginfo_class_Vector_map, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, filter, arginfo_class_Vector_filter, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, reduce, arginfo_class_Vector_reduce, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, slice, arginfo_class_Vector_slice, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, concat, arginfo_class_Vector_concat, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, toArray, arginfo_class_Vector_toArray, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, getIterator, arginfo_class_Vector_getIterator, ZEND_ACC_PUBLIC)
++	ZEND_ME(Vector, __toString, arginfo_class_Vector___toString, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static const zend_function_entry class_Map_methods[] = {
++	ZEND_ME(Map, __construct, arginfo_class_Map___construct, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, fromArray, arginfo_class_Map_fromArray, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
++	ZEND_ME(Map, count, arginfo_class_Map_count, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, isEmpty, arginfo_class_Map_isEmpty, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, has, arginfo_class_Map_has, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, get, arginfo_class_Map_get, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, set, arginfo_class_Map_set, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, remove, arginfo_class_Map_remove, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, keys, arginfo_class_Map_keys, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, values, arginfo_class_Map_values, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, map, arginfo_class_Map_map, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, filter, arginfo_class_Map_filter, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, toArray, arginfo_class_Map_toArray, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, getIterator, arginfo_class_Map_getIterator, ZEND_ACC_PUBLIC)
++	ZEND_ME(Map, __toString, arginfo_class_Map___toString, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static const zend_function_entry class_Set_methods[] = {
++	ZEND_ME(Set, __construct, arginfo_class_Set___construct, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, of, arginfo_class_Set_of, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
++	ZEND_ME(Set, fromArray, arginfo_class_Set_fromArray, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
++	ZEND_ME(Set, count, arginfo_class_Set_count, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, isEmpty, arginfo_class_Set_isEmpty, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, has, arginfo_class_Set_has, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, add, arginfo_class_Set_add, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, remove, arginfo_class_Set_remove, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, union, arginfo_class_Set_union, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, intersect, arginfo_class_Set_intersect, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, diff, arginfo_class_Set_diff, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, map, arginfo_class_Set_map, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, filter, arginfo_class_Set_filter, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, toArray, arginfo_class_Set_toArray, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, getIterator, arginfo_class_Set_getIterator, ZEND_ACC_PUBLIC)
++	ZEND_ME(Set, __toString, arginfo_class_Set___toString, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static zend_class_entry *register_class_Vector(zend_class_entry *class_entry_IteratorAggregate, zend_class_entry *class_entry_Countable, zend_class_entry *class_entry_Stringable)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Vector", class_Vector_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
++	zend_class_implements(class_entry, 3, class_entry_IteratorAggregate, class_entry_Countable, class_entry_Stringable);
++
++	return class_entry;
++}
++
++static zend_class_entry *register_class_Map(zend_class_entry *class_entry_IteratorAggregate, zend_class_entry *class_entry_Countable, zend_class_entry *class_entry_Stringable)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Map", class_Map_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
++	zend_class_implements(class_entry, 3, class_entry_IteratorAggregate, class_entry_Countable, class_entry_Stringable);
++
++	return class_entry;
++}
++
++static zend_class_entry *register_class_Set(zend_class_entry *class_entry_IteratorAggregate, zend_class_entry *class_entry_Countable, zend_class_entry *class_entry_Stringable)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "Set", class_Set_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
++	zend_class_implements(class_entry, 3, class_entry_IteratorAggregate, class_entry_Countable, class_entry_Stringable);
++
++	return class_entry;
++}
+diff --git a/configure.ac b/configure.ac
+index d71eb21b..f127bae6 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1745,6 +1745,7 @@ PHP_ADD_SOURCES([Zend], m4_normalize([
+     zend_constants.c
+     zend_cpuinfo.c
+     zend_default_classes.c
++    zend_persistent.c
+     zend_dtrace.c
+     zend_enum.c
+     zend_exceptions.c

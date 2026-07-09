@@ -1,0 +1,444 @@
+diff --git a/Zend/tests/assign_ref_error_var_handling.phpt b/Zend/tests/assign_ref_error_var_handling.phpt
+index 2a66b68c..7feaec05 100644
+--- a/Zend/tests/assign_ref_error_var_handling.phpt
++++ b/Zend/tests/assign_ref_error_var_handling.phpt
+@@ -3,9 +3,10 @@ If the LHS of ref-assign ERRORs, that takes precedence over the "only variables"
+ --FILE--
+ <?php
+ 
+-function val() {
++function make_val() {
+     return 42;
+ }
++// (renamed from `val`, which is a reserved keyword in this PHP fork)
+ 
+ $var = 24;
+ $arr = [PHP_INT_MAX => "foo"];
+@@ -16,7 +17,7 @@ try {
+ }
+ var_dump(count($arr));
+ try {
+-    var_dump($arr[] =& val());
++    var_dump($arr[] =& make_val());
+ } catch (Error $e) {
+     echo $e->getMessage(), "\n";
+ }
+diff --git a/Zend/tests/val.phpt b/Zend/tests/val.phpt
+new file mode 100644
+index 00000000..ce58bc7e
+--- /dev/null
++++ b/Zend/tests/val.phpt
+@@ -0,0 +1,50 @@
++--TEST--
++val — write-once local bindings (read, scope isolation, semi-reserved name)
++--FILE--
++<?php
++// A val reads back like any local.
++val $x = 5;
++echo $x, "\n";
++
++// Usable in expressions and passed by value.
++function dbl(int $n): int { return $n * 2; }
++val $y = 21;
++echo dbl($y) + $y, "\n";
++
++// A val array can be iterated (read) as a foreach source.
++val $xs = [1, 2, 3];
++$sum = 0;
++foreach ($xs as $v) { $sum += $v; }
++echo $sum, "\n";
++
++// val-ness is per function scope: the same name is independent across functions,
++// and a plain variable elsewhere is unaffected.
++function a() { val $v = 10; return $v; }
++function b() { val $v = 20; return $v; }
++echo a(), ",", b(), "\n";
++
++function plain() { $v = 1; $v = 2; return $v; }   // not a val — reassignable
++echo plain(), "\n";
++
++// Closures get their own scope.
++val $z = 1;
++$fn = function () { $z = 99; return $z; };
++echo $z, ",", $fn(), "\n";
++
++// `val` is only semi-reserved: still usable as a method and constant name.
++class C {
++    const val = 42;
++    public function val(int $n): string { return "m$n"; }
++}
++echo (new C)->val(7), "\n";
++echo C::val, "\n";
++?>
++--EXPECT--
++5
++63
++6
++10,20
++2
++1,99
++m7
++42
+diff --git a/Zend/tests/val_error.phpt b/Zend/tests/val_error.phpt
+new file mode 100644
+index 00000000..6265427d
+--- /dev/null
++++ b/Zend/tests/val_error.phpt
+@@ -0,0 +1,10 @@
++--TEST--
++val — reassigning a write-once local is a compile error
++--FILE--
++<?php
++val $x = 5;
++echo $x, "\n";
++$x = 6;
++?>
++--EXPECTF--
++Fatal error: Cannot reassign val $x in %s on line %d
+diff --git a/Zend/tests/val_error_compound.phpt b/Zend/tests/val_error_compound.phpt
+new file mode 100644
+index 00000000..522e7048
+--- /dev/null
++++ b/Zend/tests/val_error_compound.phpt
+@@ -0,0 +1,9 @@
++--TEST--
++val — compound assignment (+=) is a compile error
++--FILE--
++<?php
++val $x = 5;
++$x += 1;
++?>
++--EXPECTF--
++Fatal error: Cannot reassign val $x in %s on line %d
+diff --git a/Zend/tests/val_error_foreach.phpt b/Zend/tests/val_error_foreach.phpt
+new file mode 100644
+index 00000000..66126f2f
+--- /dev/null
++++ b/Zend/tests/val_error_foreach.phpt
+@@ -0,0 +1,9 @@
++--TEST--
++val — foreach write target is a compile error
++--FILE--
++<?php
++val $x = 5;
++foreach ([1] as $x) {}
++?>
++--EXPECTF--
++Fatal error: Cannot reassign val $x in %s on line %d
+diff --git a/Zend/tests/val_error_incdec.phpt b/Zend/tests/val_error_incdec.phpt
+new file mode 100644
+index 00000000..252994f3
+--- /dev/null
++++ b/Zend/tests/val_error_incdec.phpt
+@@ -0,0 +1,9 @@
++--TEST--
++val — increment is a compile error
++--FILE--
++<?php
++val $x = 5;
++$x++;
++?>
++--EXPECTF--
++Fatal error: Cannot reassign val $x in %s on line %d
+diff --git a/Zend/tests/val_error_redeclare.phpt b/Zend/tests/val_error_redeclare.phpt
+new file mode 100644
+index 00000000..bb98408c
+--- /dev/null
++++ b/Zend/tests/val_error_redeclare.phpt
+@@ -0,0 +1,9 @@
++--TEST--
++val — re-declaration is a compile error
++--FILE--
++<?php
++val $x = 5;
++val $x = 2;
++?>
++--EXPECTF--
++Fatal error: Cannot reassign val $x in %s on line %d
+diff --git a/Zend/tests/val_error_ref.phpt b/Zend/tests/val_error_ref.phpt
+new file mode 100644
+index 00000000..b78bbbed
+--- /dev/null
++++ b/Zend/tests/val_error_ref.phpt
+@@ -0,0 +1,9 @@
++--TEST--
++val — assign-by-reference is a compile error
++--FILE--
++<?php
++val $x = 5;
++$y =& $x;
++?>
++--EXPECTF--
++Fatal error: Cannot reassign val $x in %s on line %d
+diff --git a/Zend/tests/val_error_unset.phpt b/Zend/tests/val_error_unset.phpt
+new file mode 100644
+index 00000000..7ce89446
+--- /dev/null
++++ b/Zend/tests/val_error_unset.phpt
+@@ -0,0 +1,9 @@
++--TEST--
++val — unset() is a compile error
++--FILE--
++<?php
++val $x = 5;
++unset($x);
++?>
++--EXPECTF--
++Fatal error: Cannot reassign val $x in %s on line %d
+diff --git a/Zend/zend_ast.c b/Zend/zend_ast.c
+index 9cb3c7aa..638639e7 100644
+--- a/Zend/zend_ast.c
++++ b/Zend/zend_ast.c
+@@ -2472,6 +2472,12 @@ simple_list:
+ 			break;
+ 		case ZEND_AST_ASSIGN:            BINARY_OP(" = ",   90, 91, 90);
+ 		case ZEND_AST_ASSIGN_REF:        BINARY_OP(" =& ",  90, 91, 90);
++		case ZEND_AST_VAL_DECL:
++			smart_str_appends(str, "val ");
++			zend_ast_export_ex(str, ast->child[0], 0, indent);
++			smart_str_appends(str, " = ");
++			zend_ast_export_ex(str, ast->child[1], 0, indent);
++			break;
+ 		case ZEND_AST_ASSIGN_OP:
+ 			switch (ast->attr) {
+ 				case ZEND_ADD:    BINARY_OP(" += ",  90, 91, 90);
+diff --git a/Zend/zend_ast.h b/Zend/zend_ast.h
+index fb48b187..2182f68d 100644
+--- a/Zend/zend_ast.h
++++ b/Zend/zend_ast.h
+@@ -154,6 +154,7 @@ enum _zend_ast_kind {
+ 	ZEND_AST_NAMED_ARG,
+ 	ZEND_AST_PARENT_PROPERTY_HOOK_CALL,
+ 	ZEND_AST_PIPE,
++	ZEND_AST_VAL_DECL,
+ 
+ 	/* 3 child nodes */
+ 	ZEND_AST_METHOD_CALL = 3 << ZEND_AST_NUM_CHILDREN_SHIFT,
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..29d010e6 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -342,6 +342,7 @@ void zend_oparray_context_begin(zend_oparray_context *prev_context, zend_op_arra
+ 	CG(context).has_assigned_to_http_response_header = false;
+ 	CG(context).brk_cont_array = NULL;
+ 	CG(context).labels = NULL;
++	CG(context).val_vars = NULL;
+ 	CG(context).in_jmp_frameless_branch = false;
+ 	CG(context).active_property_info_name = NULL;
+ 	CG(context).active_property_hook_kind = (zend_property_hook_kind)-1;
+@@ -359,6 +360,11 @@ void zend_oparray_context_end(zend_oparray_context *prev_context) /* {{{ */
+ 		FREE_HASHTABLE(CG(context).labels);
+ 		CG(context).labels = NULL;
+ 	}
++	if (CG(context).val_vars) {
++		zend_hash_destroy(CG(context).val_vars);
++		FREE_HASHTABLE(CG(context).val_vars);
++		CG(context).val_vars = NULL;
++	}
+ 	CG(context) = *prev_context;
+ }
+ /* }}} */
+@@ -2973,6 +2979,34 @@ static bool is_global_var_fetch(zend_ast *ast)
+ 	return ast->kind == ZEND_AST_DIM && is_globals_fetch(ast->child[0]);
+ }
+ 
++/* --- `val` write-once locals --------------------------------------------- */
++
++/* Name of a plain `$x` variable AST, or NULL if it isn't a statically-known
++ * simple variable (e.g. a variable-variable `$$x`). */
++static zend_string *val_var_name(zend_ast *ast)
++{
++	if (ast->kind == ZEND_AST_VAR && ast->child[0]->kind == ZEND_AST_ZVAL) {
++		zval *name = zend_ast_get_zval(ast->child[0]);
++		if (Z_TYPE_P(name) == IS_STRING) {
++			return Z_STR_P(name);
++		}
++	}
++	return NULL;
++}
++
++/* Raise a compile error if `var_ast` writes to a `val` binding declared earlier
++ * in the current scope. Called from every variable-write compile path. */
++static void zend_check_val_reassign(zend_ast *var_ast)
++{
++	zend_string *name;
++	if (!CG(context).val_vars || !(name = val_var_name(var_ast))) {
++		return;
++	}
++	if (zend_hash_exists(CG(context).val_vars, name)) {
++		zend_error_noreturn(E_COMPILE_ERROR, "Cannot reassign val $%s", ZSTR_VAL(name));
++	}
++}
++
+ static bool this_guaranteed_exists(void) /* {{{ */
+ {
+ 	zend_oparray_context *ctx = &CG(context);
+@@ -3457,6 +3491,7 @@ static void zend_compile_assign(znode *result, zend_ast *ast) /* {{{ */
+ 	if (is_this_fetch(var_ast)) {
+ 		zend_error_noreturn(E_COMPILE_ERROR, "Cannot re-assign $this");
+ 	}
++	zend_check_val_reassign(var_ast);
+ 
+ 	zend_ensure_writable_variable(var_ast);
+ 
+@@ -3543,6 +3578,35 @@ static void zend_compile_assign(znode *result, zend_ast *ast) /* {{{ */
+ }
+ /* }}} */
+ 
++/* `val $x = EXPR;` — a write-once local. The initializer compiles as a normal
++ * assignment first (so the declaration itself is allowed); then the name is
++ * recorded so any later write to $x raises a compile error. State lives in the
++ * per-op_array context, so val-ness resets at every function boundary. */
++static void zend_compile_val_decl(zend_ast *ast) /* {{{ */
++{
++	zend_string *name = val_var_name(ast->child[0]);
++	ZEND_ASSERT(name != NULL); /* grammar guarantees a plain $variable target */
++
++	/* Move (var, expr) into a real ASSIGN node and compile it; detach from the
++	 * val-decl node so the children are owned (and freed) exactly once. */
++	zend_ast *assign = zend_ast_create(ZEND_AST_ASSIGN, ast->child[0], ast->child[1]);
++	ast->child[0] = NULL;
++	ast->child[1] = NULL;
++
++	znode result;
++	zend_compile_expr(&result, assign);
++	zend_do_free(&result);
++
++	if (!CG(context).val_vars) {
++		ALLOC_HASHTABLE(CG(context).val_vars);
++		zend_hash_init(CG(context).val_vars, 8, NULL, NULL, 0);
++	}
++	zend_hash_add_empty_element(CG(context).val_vars, name);
++
++	zend_ast_destroy(assign);
++}
++/* }}} */
++
+ static void zend_compile_assign_ref(znode *result, zend_ast *ast) /* {{{ */
+ {
+ 	zend_ast *target_ast = ast->child[0];
+@@ -3551,6 +3615,8 @@ static void zend_compile_assign_ref(znode *result, zend_ast *ast) /* {{{ */
+ 	znode target_node, source_node;
+ 	zend_op *opline;
+ 	uint32_t offset, flags;
++	zend_check_val_reassign(target_ast);
++	zend_check_val_reassign(source_ast);
+ 
+ 	if (is_this_fetch(target_ast)) {
+ 		zend_error_noreturn(E_COMPILE_ERROR, "Cannot re-assign $this");
+@@ -3624,6 +3690,7 @@ static void zend_compile_compound_assign(znode *result, zend_ast *ast) /* {{{ */
+ 	znode var_node, expr_node;
+ 	zend_op *opline;
+ 	uint32_t offset, cache_slot;
++	zend_check_val_reassign(var_ast);
+ 
+ 	zend_ensure_writable_variable(var_ast);
+ 
+@@ -5554,6 +5621,7 @@ static void zend_compile_unset(zend_ast *ast) /* {{{ */
+ 	zend_ast *var_ast = ast->child[0];
+ 	znode var_node;
+ 	zend_op *opline;
++	zend_check_val_reassign(var_ast);
+ 
+ 	zend_ensure_writable_variable(var_ast);
+ 
+@@ -6136,6 +6204,7 @@ static void zend_compile_foreach(zend_ast *ast) /* {{{ */
+ 	opnum_fetch = get_next_op_number();
+ 	opline = zend_emit_op(NULL, by_ref ? ZEND_FE_FETCH_RW : ZEND_FE_FETCH_R, &reset_node, NULL);
+ 
++	zend_check_val_reassign(value_ast);
+ 	if (is_this_fetch(value_ast)) {
+ 		zend_error_noreturn(E_COMPILE_ERROR, "Cannot re-assign $this");
+ 	} else if (value_ast->kind == ZEND_AST_VAR &&
+@@ -6155,6 +6224,7 @@ static void zend_compile_foreach(zend_ast *ast) /* {{{ */
+ 	}
+ 
+ 	if (key_ast) {
++		zend_check_val_reassign(key_ast);
+ 		opline = &CG(active_op_array)->opcodes[opnum_fetch];
+ 		zend_make_tmp_result(&key_node, opline);
+ 		zend_emit_assign_znode(key_ast, &key_node);
+@@ -10403,6 +10473,7 @@ static void zend_compile_post_incdec(znode *result, zend_ast *ast) /* {{{ */
+ {
+ 	zend_ast *var_ast = ast->child[0];
+ 	ZEND_ASSERT(ast->kind == ZEND_AST_POST_INC || ast->kind == ZEND_AST_POST_DEC);
++	zend_check_val_reassign(var_ast);
+ 
+ 	zend_ensure_writable_variable(var_ast);
+ 
+@@ -10430,6 +10501,7 @@ static void zend_compile_pre_incdec(znode *result, zend_ast *ast) /* {{{ */
+ {
+ 	zend_ast *var_ast = ast->child[0];
+ 	ZEND_ASSERT(ast->kind == ZEND_AST_PRE_INC || ast->kind == ZEND_AST_PRE_DEC);
++	zend_check_val_reassign(var_ast);
+ 
+ 	zend_ensure_writable_variable(var_ast);
+ 
+@@ -11708,6 +11780,9 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
+ 		case ZEND_AST_RETURN:
+ 			zend_compile_return(ast);
+ 			break;
++		case ZEND_AST_VAL_DECL:
++			zend_compile_val_decl(ast);
++			break;
+ 		case ZEND_AST_ECHO:
+ 			zend_compile_echo(ast);
+ 			break;
+diff --git a/Zend/zend_compile.h b/Zend/zend_compile.h
+index c07fa9bf..2e532f4c 100644
+--- a/Zend/zend_compile.h
++++ b/Zend/zend_compile.h
+@@ -205,6 +205,7 @@ typedef struct _zend_oparray_context {
+ 	int        last_brk_cont;
+ 	zend_brk_cont_element *brk_cont_array;
+ 	HashTable *labels;
++	HashTable *val_vars; /* names of `val` write-once locals in this scope */
+ 	zend_string *active_property_info_name;
+ 	zend_property_hook_kind active_property_hook_kind;
+ 	bool       in_jmp_frameless_branch;
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..958b3a1a 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -116,6 +116,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token <ident> T_CLONE         "'clone'"
+ %token <ident> T_EXIT          "'exit'"
+ %token <ident> T_IF            "'if'"
++%token <ident> T_VAL           "'val'"
+ %token <ident> T_ELSEIF        "'elseif'"
+ %token <ident> T_ELSE          "'else'"
+ %token <ident> T_ENDIF         "'endif'"
+@@ -306,7 +307,7 @@ start:
+ 
+ reserved_non_modifiers:
+ 	  T_INCLUDE | T_INCLUDE_ONCE | T_EVAL | T_REQUIRE | T_REQUIRE_ONCE | T_LOGICAL_OR | T_LOGICAL_XOR | T_LOGICAL_AND
+-	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
++	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_VAL | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
+ 	| T_FOR | T_ENDFOR | T_FOREACH | T_ENDFOREACH | T_DECLARE | T_ENDDECLARE | T_AS | T_TRY | T_CATCH | T_FINALLY
+ 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
+ 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
+@@ -510,6 +511,9 @@ statement:
+ 		'{' inner_statement_list '}' { $$ = $2; }
+ 	|	if_stmt { $$ = $1; }
+ 	|	alt_if_stmt { $$ = $1; }
++	|	T_VAL T_VARIABLE '=' expr ';'
++			{ $$ = zend_ast_create(ZEND_AST_VAL_DECL,
++			      zend_ast_create(ZEND_AST_VAR, $2), $4); }
+ 	|	T_WHILE '(' expr ')' while_statement
+ 			{ $$ = zend_ast_create(ZEND_AST_WHILE, $3, $5); }
+ 	|	T_DO statement T_WHILE '(' expr ')' ';'
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..65692355 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1454,6 +1454,10 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_IF);
+ }
+ 
++<ST_IN_SCRIPTING>"val" {
++	RETURN_TOKEN_WITH_IDENT(T_VAL);
++}
++
+ <ST_IN_SCRIPTING>"elseif" {
+ 	RETURN_TOKEN_WITH_IDENT(T_ELSEIF);
+ }

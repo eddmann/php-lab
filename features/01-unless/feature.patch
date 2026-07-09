@@ -1,0 +1,199 @@
+diff --git a/Zend/tests/unless.phpt b/Zend/tests/unless.phpt
+new file mode 100644
+index 00000000..f83516a8
+--- /dev/null
++++ b/Zend/tests/unless.phpt
+@@ -0,0 +1,62 @@
++--TEST--
++unless: Ruby-style negated-if construct (block, else, and statement modifier)
++--FILE--
++<?php
++// Block form: body runs only when the condition is false.
++unless (false) {
++    echo "block-runs\n";
++}
++unless (true) {
++    echo "should-not-print\n";
++}
++
++// else clause.
++unless (true) {
++    echo "should-not-print\n";
++} else {
++    echo "else-runs\n";
++}
++unless (false) {
++    echo "body-runs\n";
++} else {
++    echo "should-not-print\n";
++}
++
++// Statement modifier: `STMT unless COND;`.
++print "modifier-runs\n" unless false;
++print "should-not-print\n" unless true;
++
++// Equivalent to if (!cond) across values.
++foreach ([1, 0, -1] as $x) {
++    unless ($x > 0) {
++        echo "nonpos:$x\n";
++    }
++}
++
++// Semi-reserved: still usable as a method/const name.
++class C {
++    const unless = "const-ok";
++    function unless() { return "method-ok"; }
++}
++echo (new C)->unless(), "\n";
++echo C::unless, "\n";
++
++// Exposed to the tokenizer.
++var_dump(in_array(
++    "T_UNLESS",
++    array_map("token_name", array_column(token_get_all("<?php unless(true){}"), 0)),
++    true
++));
++var_dump(defined("T_UNLESS"));
++?>
++--EXPECT--
++block-runs
++else-runs
++body-runs
++modifier-runs
++nonpos:0
++nonpos:-1
++method-ok
++const-ok
++bool(true)
++bool(true)
+diff --git a/Zend/tests/unless_comprehensive.phpt b/Zend/tests/unless_comprehensive.phpt
+new file mode 100644
+index 00000000..e06bf004
+--- /dev/null
++++ b/Zend/tests/unless_comprehensive.phpt
+@@ -0,0 +1,41 @@
++--TEST--
++unless — block, else, modifier, truthiness, nesting, semi-reserved
++--FILE--
++<?php
++// block form
++unless (false) { echo "runs when false\n"; }
++unless (true)  { echo "should NOT run\n"; }
++// else
++unless (in_array(3, [1,2])) { echo "no 3\n"; } else { echo "has 3\n"; }
++unless (in_array(2, [1,2])) { echo "no 2\n"; } else { echo "has 2\n"; }
++// statement modifier
++$dry = false;
++print "saved\n" unless $dry;
++$dry = true;
++print "not-printed-when-dry\n" unless $dry;
++// truthiness parity with if(!...)
++unless (0) { echo "0 is falsy\n"; }
++unless ("") { echo "empty string falsy\n"; }
++unless ([]) { echo "empty array falsy\n"; }
++unless ("0") { echo "string zero is falsy too\n"; }
++// nesting + short-circuit
++function side(): bool { echo "side()\n"; return true; }
++unless (true && side()) { echo "no\n"; }   // side() runs
++unless (false) { unless (false) { echo "nested\n"; } }
++// semi-reserved: usable as a method/const name
++class C { const unless = 42; function unless() { return "method"; } }
++echo C::unless, "\n";
++echo (new C)->unless(), "\n";
++--EXPECT--
++runs when false
++no 3
++has 2
++saved
++0 is falsy
++empty string falsy
++empty array falsy
++string zero is falsy too
++side()
++nested
++42
++method
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..cb53111a 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -116,6 +116,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token <ident> T_CLONE         "'clone'"
+ %token <ident> T_EXIT          "'exit'"
+ %token <ident> T_IF            "'if'"
++%token <ident> T_UNLESS        "'unless'"
+ %token <ident> T_ELSEIF        "'elseif'"
+ %token <ident> T_ELSE          "'else'"
+ %token <ident> T_ENDIF         "'endif'"
+@@ -273,6 +274,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %type <ast> alt_if_stmt for_cond_exprs for_exprs switch_case_list global_var_list static_var_list
+ %type <ast> echo_expr_list unset_variables catch_name_list catch_list optional_variable parameter_list class_statement_list
+ %type <ast> implements_list case_list if_stmt_without_else
++%type <ast> unless_stmt unless_stmt_without_else unless_modifier
+ %type <ast> non_empty_parameter_list argument_list non_empty_argument_list property_list
+ %type <ast> class_const_list class_const_decl class_name_list trait_adaptations method_body non_empty_for_exprs
+ %type <ast> ctor_arguments alt_if_stmt_without_else trait_adaptation_list lexical_vars
+@@ -306,7 +308,7 @@ start:
+ 
+ reserved_non_modifiers:
+ 	  T_INCLUDE | T_INCLUDE_ONCE | T_EVAL | T_REQUIRE | T_REQUIRE_ONCE | T_LOGICAL_OR | T_LOGICAL_XOR | T_LOGICAL_AND
+-	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
++	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_UNLESS | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
+ 	| T_FOR | T_ENDFOR | T_FOREACH | T_ENDFOREACH | T_DECLARE | T_ENDDECLARE | T_AS | T_TRY | T_CATCH | T_FINALLY
+ 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
+ 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
+@@ -510,6 +512,8 @@ statement:
+ 		'{' inner_statement_list '}' { $$ = $2; }
+ 	|	if_stmt { $$ = $1; }
+ 	|	alt_if_stmt { $$ = $1; }
++	|	unless_stmt { $$ = $1; }
++	|	unless_modifier { $$ = $1; }
+ 	|	T_WHILE '(' expr ')' while_statement
+ 			{ $$ = zend_ast_create(ZEND_AST_WHILE, $3, $5); }
+ 	|	T_DO statement T_WHILE '(' expr ')' ';'
+@@ -789,6 +793,30 @@ alt_if_stmt:
+ 			      zend_ast_create(ZEND_AST_IF_ELEM, NULL, $4)); }
+ ;
+ 
++/* `unless (C) S` desugars to `if (!C) S` by emitting the same IF/IF_ELEM AST
++ * with the condition wrapped in a boolean-NOT node. No compiler changes needed. */
++unless_stmt_without_else:
++		T_UNLESS '(' expr ')' statement
++			{ $$ = zend_ast_create_list(1, ZEND_AST_IF,
++			      zend_ast_create(ZEND_AST_IF_ELEM,
++			          zend_ast_create_ex(ZEND_AST_UNARY_OP, ZEND_BOOL_NOT, $3), $5)); }
++;
++
++unless_stmt:
++		unless_stmt_without_else %prec T_NOELSE { $$ = $1; }
++	|	unless_stmt_without_else T_ELSE statement
++			{ $$ = zend_ast_list_add($1, zend_ast_create(ZEND_AST_IF_ELEM, NULL, $3)); }
++;
++
++/* Statement modifier: `STMT unless COND;` (Ruby style). The left expression
++ * runs unless the condition holds, i.e. `if (!COND) STMT`. */
++unless_modifier:
++		expr T_UNLESS expr ';'
++			{ $$ = zend_ast_create_list(1, ZEND_AST_IF,
++			      zend_ast_create(ZEND_AST_IF_ELEM,
++			          zend_ast_create_ex(ZEND_AST_UNARY_OP, ZEND_BOOL_NOT, $3), $1)); }
++;
++
+ parameter_list:
+ 		non_empty_parameter_list possible_comma { $$ = $1; }
+ 	|	%empty	{ $$ = zend_ast_create_list(0, ZEND_AST_PARAM_LIST); }
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..697c2a32 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1454,6 +1454,10 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_IF);
+ }
+ 
++<ST_IN_SCRIPTING>"unless" {
++	RETURN_TOKEN_WITH_IDENT(T_UNLESS);
++}
++
+ <ST_IN_SCRIPTING>"elseif" {
+ 	RETURN_TOKEN_WITH_IDENT(T_ELSEIF);
+ }

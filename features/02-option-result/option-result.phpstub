@@ -1,0 +1,291 @@
+<?php
+
+/**
+ * Static-analysis stubs (PHPStan / Psalm) for the engine-provided Option/Result
+ * types added by feature.patch.
+ *
+ * The runtime classes are defined in C and carry no generics (PHP has no runtime
+ * generics); these stubs give analyzers the generic shapes so userland code gets
+ * full inference — e.g. `Some(5)->map(fn($x) => $x * 2)` is `Some<int>`.
+ *
+ * Wire it up:
+ *   PHPStan (phpstan.neon):  parameters: { stubFiles: ['stubs/option-result.phpstub'] }
+ *   Psalm (psalm.xml):       <stubs><file name="stubs/option-result.phpstub"/></stubs>
+ */
+
+/**
+ * @template-covariant T
+ */
+interface Propagatable
+{
+    public function isFailure(): bool;
+
+    /** @return T */
+    public function getValue(): mixed;
+}
+
+/**
+ * @template-covariant T
+ * @implements Propagatable<T>
+ */
+abstract class Option implements Propagatable
+{
+    /**
+     * @template TValue
+     * @param TValue $value
+     * @return Some<TValue>
+     */
+    final public static function some(mixed $value): Some {}
+
+    /** @return None */
+    final public static function none(): None {}
+
+    /**
+     * @template TValue
+     * @param TValue|null $value
+     * @return ($value is null ? None : Some<TValue>)
+     */
+    final public static function fromNullable(mixed $value): Option {}
+
+    /**
+     * @template TValue
+     * @param array<Option<TValue>> $options
+     * @return Option<array<TValue>>
+     */
+    final public static function all(array $options): Option {}
+
+    /** @phpstan-assert-if-true Some<T> $this */
+    final public function isSome(): bool {}
+
+    /** @phpstan-assert-if-true None $this */
+    final public function isNone(): bool {}
+
+    final public function isFailure(): bool {}
+
+    /** @return T */
+    public function getValue(): mixed {}
+
+    /** @return T */
+    final public function unwrap(): mixed {}
+
+    /** @return T */
+    final public function expect(string $message): mixed {}
+
+    /**
+     * @template TDefault
+     * @param TDefault $default
+     * @return T|TDefault
+     */
+    final public function unwrapOr(mixed $default): mixed {}
+
+    /**
+     * @template U
+     * @param callable(T): U $fn
+     * @return Option<U>
+     */
+    final public function map(callable $fn): Option {}
+
+    /**
+     * @template U
+     * @param callable(T): Option<U> $fn
+     * @return Option<U>
+     */
+    final public function flatMap(callable $fn): Option {}
+
+    /**
+     * @param callable(T): bool $fn
+     * @return Option<T>
+     */
+    final public function filter(callable $fn): Option {}
+
+    /**
+     * @template U
+     * @param callable(): Option<U> $fn
+     * @return Option<T|U>
+     */
+    final public function orElse(callable $fn): Option {}
+
+    /**
+     * @template E
+     * @param E $error
+     * @return Result<T, E>
+     */
+    final public function okOr(mixed $error): Result {}
+
+    /** @return T|null */
+    final public function toNullable(): mixed {}
+
+    public function __toString(): string {}
+}
+
+/**
+ * @template-covariant T
+ * @extends Option<T>
+ */
+final class Some extends Option
+{
+    /** @var T */
+    public mixed $value;
+
+    /** @param T $value */
+    public function __construct(mixed $value) {}
+}
+
+/**
+ * @extends Option<never>
+ */
+final class None extends Option
+{
+}
+
+/**
+ * @template-covariant T
+ * @template-covariant E
+ * @implements Propagatable<T>
+ */
+abstract class Result implements Propagatable
+{
+    /**
+     * @template TValue
+     * @param TValue $value
+     * @return Ok<TValue>
+     */
+    final public static function ok(mixed $value): Ok {}
+
+    /**
+     * @template TError
+     * @param TError $error
+     * @return Err<TError>
+     */
+    final public static function err(mixed $error): Err {}
+
+    /**
+     * @template TValue
+     * @param callable(): TValue $fn
+     * @return Result<TValue, \Throwable>
+     */
+    final public static function try(callable $fn): Result {}
+
+    /**
+     * @template TValue
+     * @template TError
+     * @param array<Result<TValue, TError>> $results
+     * @return Result<array<TValue>, TError>
+     */
+    final public static function all(array $results): Result {}
+
+    /** @phpstan-assert-if-true Ok<T> $this */
+    final public function isOk(): bool {}
+
+    /** @phpstan-assert-if-true Err<E> $this */
+    final public function isErr(): bool {}
+
+    final public function isFailure(): bool {}
+
+    /** @return T */
+    public function getValue(): mixed {}
+
+    /** @return E */
+    final public function getError(): mixed {}
+
+    /** @return T */
+    final public function unwrap(): mixed {}
+
+    /** @return T */
+    final public function expect(string $message): mixed {}
+
+    /**
+     * @template TDefault
+     * @param TDefault $default
+     * @return T|TDefault
+     */
+    final public function unwrapOr(mixed $default): mixed {}
+
+    /**
+     * @template U
+     * @param callable(T): U $fn
+     * @return Result<U, E>
+     */
+    final public function map(callable $fn): Result {}
+
+    /**
+     * @template U
+     * @template F
+     * @param callable(T): Result<U, F> $fn
+     * @return Result<U, E|F>
+     */
+    final public function flatMap(callable $fn): Result {}
+
+    /**
+     * @template F
+     * @param callable(E): F $fn
+     * @return Result<T, F>
+     */
+    final public function mapErr(callable $fn): Result {}
+
+    /**
+     * @template U
+     * @template F
+     * @param callable(E): Result<U, F> $fn
+     * @return Result<T|U, F>
+     */
+    final public function orElse(callable $fn): Result {}
+
+    /** @return Option<T> */
+    final public function toOption(): Option {}
+
+    /** @return T|null */
+    final public function toNullable(): mixed {}
+
+    public function __toString(): string {}
+}
+
+/**
+ * @template-covariant T
+ * @extends Result<T, never>
+ */
+final class Ok extends Result
+{
+    /** @var T */
+    public mixed $value;
+
+    /** @param T $value */
+    public function __construct(mixed $value) {}
+}
+
+/**
+ * @template-covariant E
+ * @extends Result<never, E>
+ */
+final class Err extends Result
+{
+    /** @var E */
+    public mixed $error;
+
+    /** @param E $error */
+    public function __construct(mixed $error) {}
+}
+
+/**
+ * @template T
+ * @param T $value
+ * @return Some<T>
+ */
+function Some(mixed $value): Some {}
+
+/** @return None */
+function None(): None {}
+
+/**
+ * @template T
+ * @param T $value
+ * @return Ok<T>
+ */
+function Ok(mixed $value): Ok {}
+
+/**
+ * @template E
+ * @param E $error
+ * @return Err<E>
+ */
+function Err(mixed $error): Err {}

@@ -1,0 +1,719 @@
+diff --git a/Zend/tests/refinements.phpt b/Zend/tests/refinements.phpt
+new file mode 100644
+index 00000000..b14f53e0
+--- /dev/null
++++ b/Zend/tests/refinements.phpt
+@@ -0,0 +1,57 @@
++--TEST--
++refinements — scoped extension/override methods (scalars, arrays, classes)
++--FILE--
++<?php
++refinement Str for string {
++    function shout(): string { return strtoupper($this) . '!'; }
++}
++refinement Num for int {
++    function plus(int $n): int { return $this + $n; }
++}
++refinement Arr for array {
++    function total(): int { return array_sum($this); }
++}
++
++class Money {
++    public function __construct(public int $cents) {}
++    public function fmt(): string { return '$' . $this->cents; }
++}
++refinement Eu for Money {
++    function fmt(): string { return $this->cents . ' EUR'; }   // override
++    function half(): Money { return new Money((int)($this->cents / 2)); } // add
++}
++
++using Str;
++using Num;
++using Arr;
++using Eu;
++
++// Scalars and arrays gain methods.
++echo "hi"->shout(), "\n";
++echo (40)->plus(2), "\n";
++echo [1, 2, 3, 4]->total(), "\n";
++
++// Add a new method to a class, and override an existing one.
++$m = new Money(1000);
++echo $m->fmt(), "\n";            // overridden -> "1000 EUR"
++echo $m->half()->cents, "\n";   // added -> 500
++
++// A normal call with no matching refinement falls through to the real method.
++class Plain { public function hi(): string { return 'hello'; } }
++echo (new Plain)->hi(), "\n";
++
++// Visibility is preserved on the fallback path (private call still works).
++class WithPriv {
++    private function secret(): string { return 'shh'; }
++    public function run(): string { return $this->secret(); }
++}
++echo (new WithPriv)->run(), "\n";
++?>
++--EXPECT--
++HI!
++42
++10
++1000 EUR
++500
++hello
++shh
+diff --git a/Zend/tests/refinements_override.phpt b/Zend/tests/refinements_override.phpt
+new file mode 100644
+index 00000000..05744185
+--- /dev/null
++++ b/Zend/tests/refinements_override.phpt
+@@ -0,0 +1,23 @@
++--TEST--
++refinements — class override, add, subclass, fallback
++--FILE--
++<?php
++class Money { public function __construct(public int $cents) {} function fmt(): string { return '$' . $this->cents; } }
++refinement Eu for Money {
++    function fmt(): string { return $this->cents . ' EUR'; }        // override
++    function half(): Money { return new Money((int)($this->cents / 2)); } // add
++}
++using Eu;
++$m = new Money(1000);
++echo $m->fmt(), "\n";                    // overridden: "1000 EUR"
++echo $m->half()->fmt(), "\n";            // added + overridden: "500 EUR"
++// subclass application
++class Cash extends Money {}
++echo (new Cash(200))->fmt(), "\n";       // "200 EUR"
++// fallback to normal method for unrefined calls
++echo strlen("plain"), "\n";
++--EXPECT--
++1000 EUR
++500 EUR
++200 EUR
++5
+diff --git a/Zend/tests/refinements_scalars.phpt b/Zend/tests/refinements_scalars.phpt
+new file mode 100644
+index 00000000..42516062
+--- /dev/null
++++ b/Zend/tests/refinements_scalars.phpt
+@@ -0,0 +1,31 @@
++--TEST--
++refinements — scalars, arrays, ints, non-refined class default
++--FILE--
++<?php
++refinement Str for string {
++    function shout(): string { return strtoupper($this) . '!'; }
++    function repeatN(int $n): string { return str_repeat($this, $n); }
++}
++refinement Arr for array {
++    function sum(): int { return array_sum($this); }
++}
++refinement Num for int {
++    function double(): int { return $this * 2; }
++}
++using Str;
++using Arr;
++using Num;
++echo "hi"->shout(), "\n";           // scalar string
++echo "ab"->repeatN(3), "\n";
++echo [1,2,3,4]->sum(), "\n";        // array
++echo (21)->double(), "\n";            // int
++// override + add on a class, scoped
++class Money { public function __construct(public int $cents) {} function fmt() { return '$' . $this->cents; } }
++$m = new Money(1000);
++echo $m->fmt(), "\n";               // default here (no refinement active for Money yet in this scope? it is via file)
++--EXPECT--
++HI!
++ababab
++10
++42
++$1000
+diff --git a/Zend/zend_ast.c b/Zend/zend_ast.c
+index 9cb3c7aa..896b15af 100644
+--- a/Zend/zend_ast.c
++++ b/Zend/zend_ast.c
+@@ -2394,6 +2394,18 @@ simple_list:
+ 			APPEND_STR("__HALT_COMPILER()");
+ 		case ZEND_AST_ECHO:
+ 			APPEND_NODE_1("echo");
++		case ZEND_AST_USING:
++			smart_str_appends(str, "using ");
++			zend_ast_export_ex(str, ast->child[0], 0, indent);
++			smart_str_appendc(str, ';');
++			break;
++		case ZEND_AST_REFINEMENT:
++			smart_str_appends(str, "refinement ");
++			zend_ast_export_ex(str, ast->child[0], 0, indent);
++			smart_str_appends(str, " for ");
++			zend_ast_export_ex(str, ast->child[1], 0, indent);
++			smart_str_appends(str, " { ... }");
++			break;
+ 		case ZEND_AST_THROW:
+ 			APPEND_NODE_1("throw");
+ 		case ZEND_AST_GOTO:
+diff --git a/Zend/zend_ast.h b/Zend/zend_ast.h
+index fb48b187..9b2bb91f 100644
+--- a/Zend/zend_ast.h
++++ b/Zend/zend_ast.h
+@@ -99,6 +99,7 @@ enum _zend_ast_kind {
+ 	ZEND_AST_YIELD_FROM,
+ 	ZEND_AST_CLASS_NAME,
+ 
++	ZEND_AST_USING,
+ 	ZEND_AST_GLOBAL,
+ 	ZEND_AST_UNSET,
+ 	ZEND_AST_RETURN,
+@@ -161,6 +162,7 @@ enum _zend_ast_kind {
+ 	ZEND_AST_STATIC_CALL,
+ 	ZEND_AST_CONDITIONAL,
+ 
++	ZEND_AST_REFINEMENT,
+ 	ZEND_AST_TRY,
+ 	ZEND_AST_CATCH,
+ 	ZEND_AST_PROP_GROUP,
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..f89281ee 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -403,6 +403,7 @@ void zend_file_context_begin(zend_file_context *prev_context) /* {{{ */
+ 	FC(imports) = NULL;
+ 	FC(imports_function) = NULL;
+ 	FC(imports_const) = NULL;
++	FC(active_refinements) = NULL;
+ 	FC(current_namespace) = NULL;
+ 	FC(in_namespace) = 0;
+ 	FC(has_bracketed_namespaces) = 0;
+@@ -415,6 +416,11 @@ void zend_file_context_end(zend_file_context *prev_context) /* {{{ */
+ {
+ 	zend_end_namespace();
+ 	zend_hash_destroy(&FC(seen_symbols));
++	if (FC(active_refinements)) {
++		zend_hash_destroy(FC(active_refinements));
++		FREE_HASHTABLE(FC(active_refinements));
++		FC(active_refinements) = NULL;
++	}
+ 	CG(file_context) = *prev_context;
+ }
+ /* }}} */
+@@ -5234,8 +5240,54 @@ static void zend_compile_call(znode *result, zend_ast *ast, uint32_t type) /* {{
+ }
+ /* }}} */
+ 
++/* In a refinement-active file, rewrite `$recv->m(args)` to
++ * `__refine_call($recv, "m", [active refinements], ...args)`. The runtime helper
++ * checks active refinements first (override + add-methods + scalar methods) and
++ * otherwise falls back to a normal, scope-correct method call. */
++static void zend_compile_refined_method_call(znode *result, zend_ast *ast)
++{
++	zend_ast *obj = ast->child[0];
++	zend_ast *method = ast->child[1];
++	zend_ast_list *args = zend_ast_get_list(ast->child[2]);
++
++	zend_ast *names = zend_ast_create_list(0, ZEND_AST_ARRAY);
++	zend_string *rn;
++	ZEND_HASH_MAP_FOREACH_STR_KEY(FC(active_refinements), rn) {
++		zval z;
++		ZVAL_STR(&z, zend_string_copy(rn));
++		names = zend_ast_list_add(names,
++			zend_ast_create_ex(ZEND_AST_ARRAY_ELEM, 0, zend_ast_create_zval(&z), NULL));
++	} ZEND_HASH_FOREACH_END();
++
++	zend_ast *arglist = zend_ast_create_list(0, ZEND_AST_ARG_LIST);
++	arglist = zend_ast_list_add(arglist, obj);
++	arglist = zend_ast_list_add(arglist, method);
++	arglist = zend_ast_list_add(arglist, names);
++	for (uint32_t i = 0; i < args->children; i++) {
++		arglist = zend_ast_list_add(arglist, args->child[i]);
++		args->child[i] = NULL;
++	}
++	ast->child[0] = NULL;
++	ast->child[1] = NULL;
++
++	zend_ast *fname = zend_ast_create_zval_from_str(
++		zend_string_init("__refine_call", sizeof("__refine_call") - 1, 0));
++	fname->attr = ZEND_NAME_FQ;
++	zend_ast *call = zend_ast_create(ZEND_AST_CALL, fname, arglist);
++
++	zend_compile_expr(result, call);
++	zend_ast_destroy(call);
++}
++
+ static void zend_compile_method_call(znode *result, zend_ast *ast, uint32_t type) /* {{{ */
+ {
++	if (ast->kind == ZEND_AST_METHOD_CALL && FC(active_refinements)
++	 && zend_hash_num_elements(FC(active_refinements)) > 0
++	 && ast->child[2]->kind == ZEND_AST_ARG_LIST) {
++		zend_compile_refined_method_call(result, ast);
++		return;
++	}
++
+ 	zend_ast *obj_ast = ast->child[0];
+ 	zend_ast *method_ast = ast->child[1];
+ 	zend_ast *args_ast = ast->child[2];
+@@ -8639,6 +8691,126 @@ static zend_op_array *zend_compile_func_decl(znode *result, zend_ast *ast, enum
+ 	return zend_compile_func_decl_ex(result, ast, level, /* property_info */ NULL, (zend_property_hook_kind)-1);
+ }
+ 
++/* --- refinements (scoped, reversible extension/override of methods) --- */
++
++/* Build the mangled function-table key for a refinement method:
++ * "\0refine\0" + refinement + "\0" + type + "\0" + method, all lowercase. The
++ * leading NUL keeps it unreachable from userland. The runtime dispatcher
++ * (zend_refinements.c) builds the identical key. */
++ZEND_API zend_string *zend_refinement_mangle(
++	const char *ref, size_t ref_len, const char *type, size_t type_len,
++	const char *meth, size_t meth_len)
++{
++	const size_t pre = sizeof("\0refine\0") - 1; /* "\0refine\0" */
++	size_t total = pre + ref_len + 1 + type_len + 1 + meth_len;
++	zend_string *s = zend_string_alloc(total, 0);
++	char *p = ZSTR_VAL(s);
++	memcpy(p, "\0refine\0", pre); p += pre;
++	memcpy(p, ref, ref_len);      p += ref_len;
++	*p++ = '\0';
++	memcpy(p, type, type_len);    p += type_len;
++	*p++ = '\0';
++	memcpy(p, meth, meth_len);    p += meth_len;
++	*p = '\0';
++	zend_string *lc = zend_string_tolower(s);
++	zend_string_release(s);
++	return lc;
++}
++
++/* Rewrite `$this` -> `$__self` throughout a refinement method body, without
++ * descending into nested function/class scopes (which rebind $this). */
++static void refine_rewrite_this(zend_ast *ast)
++{
++	if (!ast || ast->kind == ZEND_AST_ZVAL) {
++		return;
++	}
++	if (ast->kind == ZEND_AST_VAR && ast->child[0] && ast->child[0]->kind == ZEND_AST_ZVAL) {
++		zval *nm = zend_ast_get_zval(ast->child[0]);
++		if (Z_TYPE_P(nm) == IS_STRING && zend_string_equals_literal(Z_STR_P(nm), "this")) {
++			zval_ptr_dtor_nogc(nm);
++			ZVAL_STR(nm, zend_string_init("__self", sizeof("__self") - 1, 0));
++		}
++		return;
++	}
++	switch (ast->kind) {
++		case ZEND_AST_FUNC_DECL:
++		case ZEND_AST_CLOSURE:
++		case ZEND_AST_ARROW_FUNC:
++		case ZEND_AST_METHOD:
++		case ZEND_AST_CLASS:
++			return; /* own $this scope */
++		default:
++			break;
++	}
++	if (zend_ast_is_list(ast)) {
++		zend_ast_list *l = zend_ast_get_list(ast);
++		for (uint32_t i = 0; i < l->children; i++) {
++			refine_rewrite_this(l->child[i]);
++		}
++	} else {
++		uint32_t n = zend_ast_get_num_children(ast);
++		for (uint32_t i = 0; i < n; i++) {
++			refine_rewrite_this(ast->child[i]);
++		}
++	}
++}
++
++/* `refinement R for T { function m(...) {...} ... }` — compile each method into a
++ * plain function named by the mangled key, with the receiver injected as the
++ * first parameter ($__self, which the body's $this was rewritten to). */
++static void zend_compile_refinement(zend_ast *ast)
++{
++	zend_string *ref  = zend_ast_get_str(ast->child[0]);
++	zend_string *type = zend_ast_get_str(ast->child[1]);
++	zend_ast_list *methods = zend_ast_get_list(ast->child[2]);
++
++	for (uint32_t i = 0; i < methods->children; i++) {
++		zend_ast *m = methods->child[i];
++		if (m->kind != ZEND_AST_FUNC_DECL) {
++			zend_error_noreturn(E_COMPILE_ERROR,
++				"A refinement body may contain only method definitions");
++		}
++		zend_ast_decl *decl = (zend_ast_decl *) m;
++
++		refine_rewrite_this(decl->child[2]);
++
++		/* prepend `$__self` to the parameter list */
++		zend_ast *self_param = zend_ast_create_ex(ZEND_AST_PARAM, 0, NULL,
++			zend_ast_create_zval_from_str(zend_string_init("__self", sizeof("__self") - 1, 0)),
++			NULL, NULL, NULL, NULL);
++		zend_ast_list *pl = zend_ast_get_list(decl->child[0]);
++		zend_ast *newparams = zend_ast_create_list(1, ZEND_AST_PARAM_LIST, self_param);
++		for (uint32_t p = 0; p < pl->children; p++) {
++			newparams = zend_ast_list_add(newparams, pl->child[p]);
++			pl->child[p] = NULL;
++		}
++		zend_ast_destroy(decl->child[0]);
++		decl->child[0] = newparams;
++
++		/* rename to the mangled key and register as a normal top-level function */
++		zend_string *mangled = zend_refinement_mangle(
++			ZSTR_VAL(ref), ZSTR_LEN(ref), ZSTR_VAL(type), ZSTR_LEN(type),
++			ZSTR_VAL(decl->name), ZSTR_LEN(decl->name));
++		zend_string_release(decl->name);
++		decl->name = mangled;
++
++		zend_compile_func_decl(NULL, m, FUNC_DECL_LEVEL_TOPLEVEL);
++	}
++}
++
++/* `using X;` — record refinement X as active for the rest of this file. */
++static void zend_compile_using(zend_ast *ast)
++{
++	zend_string *name = zend_ast_get_str(ast->child[0]);
++	if (!FC(active_refinements)) {
++		ALLOC_HASHTABLE(FC(active_refinements));
++		zend_hash_init(FC(active_refinements), 8, NULL, NULL, 0);
++	}
++	zend_string *lc = zend_string_tolower(name);
++	zend_hash_add_empty_element(FC(active_refinements), lc);
++	zend_string_release(lc);
++}
++
+ zend_property_hook_kind zend_get_property_hook_kind_from_name(zend_string *name) {
+ 	if (zend_string_equals_literal_ci(name, "get")) {
+ 		return ZEND_PROPERTY_HOOK_GET;
+@@ -11708,6 +11880,12 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
+ 		case ZEND_AST_RETURN:
+ 			zend_compile_return(ast);
+ 			break;
++		case ZEND_AST_REFINEMENT:
++			zend_compile_refinement(ast);
++			break;
++		case ZEND_AST_USING:
++			zend_compile_using(ast);
++			break;
+ 		case ZEND_AST_ECHO:
+ 			zend_compile_echo(ast);
+ 			break;
+diff --git a/Zend/zend_compile.h b/Zend/zend_compile.h
+index c07fa9bf..3040393e 100644
+--- a/Zend/zend_compile.h
++++ b/Zend/zend_compile.h
+@@ -119,6 +119,8 @@ typedef struct _zend_file_context {
+ 	HashTable *imports_function;
+ 	HashTable *imports_const;
+ 
++	HashTable *active_refinements; /* names of refinements activated via `using` */
++
+ 	HashTable seen_symbols;
+ } zend_file_context;
+ 
+@@ -935,6 +937,7 @@ zend_string *zval_make_interned_string(zval *zv);
+ /* helper functions in zend_language_scanner.l */
+ struct _zend_arena;
+ 
++ZEND_API zend_string *zend_refinement_mangle(const char *ref, size_t ref_len, const char *type, size_t type_len, const char *meth, size_t meth_len);
+ ZEND_API zend_op_array *compile_file(zend_file_handle *file_handle, int type);
+ ZEND_API zend_op_array *compile_string(zend_string *source_string, const char *filename, zend_compile_position position);
+ ZEND_API zend_op_array *compile_filename(int type, zend_string *filename);
+diff --git a/Zend/zend_default_classes.c b/Zend/zend_default_classes.c
+index 7ab9b832..b1ca161f 100644
+--- a/Zend/zend_default_classes.c
++++ b/Zend/zend_default_classes.c
+@@ -28,6 +28,7 @@
+ #include "zend_weakrefs.h"
+ #include "zend_enum.h"
+ #include "zend_fibers.h"
++#include "zend_refinements.h"
+ 
+ ZEND_API void zend_register_default_classes(void)
+ {
+@@ -40,4 +41,5 @@ ZEND_API void zend_register_default_classes(void)
+ 	zend_register_attribute_ce();
+ 	zend_register_enum_ce();
+ 	zend_register_fiber_ce();
++	zend_register_refinements();
+ }
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..ffffeda8 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -116,6 +116,8 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token <ident> T_CLONE         "'clone'"
+ %token <ident> T_EXIT          "'exit'"
+ %token <ident> T_IF            "'if'"
++%token <ident> T_REFINEMENT    "'refinement'"
++%token <ident> T_USING         "'using'"
+ %token <ident> T_ELSEIF        "'elseif'"
+ %token <ident> T_ELSE          "'else'"
+ %token <ident> T_ENDIF         "'endif'"
+@@ -284,6 +286,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %type <ast> attributed_statement attributed_top_statement attributed_class_statement attributed_parameter
+ %type <ast> attribute_decl attribute attributes attribute_group namespace_declaration_name
+ %type <ast> match match_arm_list non_empty_match_arm_list match_arm match_arm_cond_list
++%type <ast> refinement_method_list
+ %type <ast> enum_declaration_statement enum_backing_type enum_case enum_case_expr
+ %type <ast> function_name non_empty_member_modifiers
+ %type <ast> property_hook property_hook_list optional_property_hook_list hooked_property property_hook_body
+@@ -306,7 +309,7 @@ start:
+ 
+ reserved_non_modifiers:
+ 	  T_INCLUDE | T_INCLUDE_ONCE | T_EVAL | T_REQUIRE | T_REQUIRE_ONCE | T_LOGICAL_OR | T_LOGICAL_XOR | T_LOGICAL_AND
+-	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
++	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_REFINEMENT | T_USING | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
+ 	| T_FOR | T_ENDFOR | T_FOREACH | T_ENDFOREACH | T_DECLARE | T_ENDDECLARE | T_AS | T_TRY | T_CATCH | T_FINALLY
+ 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
+ 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
+@@ -510,6 +513,10 @@ statement:
+ 		'{' inner_statement_list '}' { $$ = $2; }
+ 	|	if_stmt { $$ = $1; }
+ 	|	alt_if_stmt { $$ = $1; }
++	|	T_REFINEMENT T_STRING T_FOR identifier '{' refinement_method_list '}'
++			{ $$ = zend_ast_create(ZEND_AST_REFINEMENT, $2, $4, $6); }
++	|	T_USING T_STRING ';'
++			{ $$ = zend_ast_create(ZEND_AST_USING, $2); }
+ 	|	T_WHILE '(' expr ')' while_statement
+ 			{ $$ = zend_ast_create(ZEND_AST_WHILE, $3, $5); }
+ 	|	T_DO statement T_WHILE '(' expr ')' ';'
+@@ -752,6 +759,14 @@ match_arm_cond_list:
+ ;
+ 
+ 
++/* Body of a `refinement R for T { ... }` block: a list of function decls. */
++refinement_method_list:
++		%empty
++			{ $$ = zend_ast_create_list(0, ZEND_AST_STMT_LIST); }
++	|	refinement_method_list function_declaration_statement
++			{ $$ = zend_ast_list_add($1, $2); }
++;
++
+ while_statement:
+ 		statement { $$ = $1; }
+ 	|	':' inner_statement_list T_ENDWHILE ';' { $$ = $2; }
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..063f5324 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1802,6 +1802,14 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_READONLY);
+ }
+ 
++<ST_IN_SCRIPTING>"refinement" {
++	RETURN_TOKEN_WITH_IDENT(T_REFINEMENT);
++}
++
++<ST_IN_SCRIPTING>"using" {
++	RETURN_TOKEN_WITH_IDENT(T_USING);
++}
++
+ <ST_IN_SCRIPTING>"unset" {
+ 	RETURN_TOKEN_WITH_IDENT(T_UNSET);
+ }
+diff --git a/Zend/zend_refinements.c b/Zend/zend_refinements.c
+new file mode 100644
+index 00000000..533863dd
+--- /dev/null
++++ b/Zend/zend_refinements.c
+@@ -0,0 +1,133 @@
++/*
++   +----------------------------------------------------------------------+
++   | Runtime dispatch for `refinement`/`using` (scoped extension methods). |
++   |                                                                      |
++   | A refinement method `R::T::m` is compiled to a plain function named   |
++   | by zend_refinement_mangle(R, T, m); the receiver is its first param   |
++   | ($__self, the body's $this). The compiler rewrites refined `->` calls |
++   | to __refine_call(), which looks up an active refinement matching the  |
++   | receiver's type and method, calls it, or falls back to a normal,      |
++   | scope-correct method call.                                            |
++   +----------------------------------------------------------------------+
++*/
++
++#include "zend.h"
++#include "zend_API.h"
++#include "zend_compile.h"
++#include "zend_exceptions.h"
++#include "zend_refinements.h"
++#include "zend_refinements_arginfo.h"
++
++static zend_function *refine_lookup_type(
++	zend_string *ref, const char *type, size_t type_len, zend_string *method)
++{
++	zend_string *key = zend_refinement_mangle(
++		ZSTR_VAL(ref), ZSTR_LEN(ref), type, type_len, ZSTR_VAL(method), ZSTR_LEN(method));
++	zend_function *fn = zend_hash_find_ptr(EG(function_table), key);
++	zend_string_release(key);
++	return fn;
++}
++
++/* Find a refinement function for (ref, typeof recv, method). For objects the
++ * class hierarchy and interfaces are tried so a refinement `for Base` also
++ * applies to subclasses. */
++static zend_function *refine_lookup(zend_string *ref, zval *recv, zend_string *method)
++{
++	switch (Z_TYPE_P(recv)) {
++		case IS_OBJECT: {
++			zend_class_entry *ce = Z_OBJCE_P(recv);
++			for (zend_class_entry *c = ce; c; c = c->parent) {
++				zend_function *fn = refine_lookup_type(ref, ZSTR_VAL(c->name), ZSTR_LEN(c->name), method);
++				if (fn) {
++					return fn;
++				}
++			}
++			for (uint32_t i = 0; i < ce->num_interfaces; i++) {
++				zend_class_entry *iface = ce->interfaces[i];
++				zend_function *fn = refine_lookup_type(ref, ZSTR_VAL(iface->name), ZSTR_LEN(iface->name), method);
++				if (fn) {
++					return fn;
++				}
++			}
++			return NULL;
++		}
++		case IS_STRING: return refine_lookup_type(ref, "string", sizeof("string") - 1, method);
++		case IS_LONG:   return refine_lookup_type(ref, "int", sizeof("int") - 1, method);
++		case IS_DOUBLE: return refine_lookup_type(ref, "float", sizeof("float") - 1, method);
++		case IS_TRUE:
++		case IS_FALSE:  return refine_lookup_type(ref, "bool", sizeof("bool") - 1, method);
++		case IS_ARRAY:  return refine_lookup_type(ref, "array", sizeof("array") - 1, method);
++		case IS_NULL:   return refine_lookup_type(ref, "null", sizeof("null") - 1, method);
++		default:        return NULL;
++	}
++}
++
++ZEND_FUNCTION(__refine_call)
++{
++	zval *recv, *method_zv, *refs, *extra;
++	uint32_t extra_count;
++	ZEND_PARSE_PARAMETERS_START(3, -1)
++		Z_PARAM_ZVAL(recv)
++		Z_PARAM_ZVAL(method_zv)
++		Z_PARAM_ARRAY(refs)
++		Z_PARAM_VARIADIC('*', extra, extra_count)
++	ZEND_PARSE_PARAMETERS_END();
++
++	ZVAL_DEREF(recv);
++	zend_string *method = zval_get_string(method_zv);
++
++	/* 1) An active refinement matching the receiver type wins (override + add). */
++	zend_function *fn = NULL;
++	zval *refz;
++	ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(refs), refz) {
++		if (Z_TYPE_P(refz) != IS_STRING) {
++			continue;
++		}
++		fn = refine_lookup(Z_STR_P(refz), recv, method);
++		if (fn) {
++			break;
++		}
++	} ZEND_HASH_FOREACH_END();
++
++	if (fn) {
++		uint32_t pc = extra_count + 1;
++		zval *params = safe_emalloc(pc, sizeof(zval), 0);
++		ZVAL_COPY(&params[0], recv);
++		for (uint32_t i = 0; i < extra_count; i++) {
++			ZVAL_COPY(&params[i + 1], &extra[i]);
++		}
++		zend_call_known_function(fn, NULL, NULL, return_value, pc, params, NULL);
++		for (uint32_t i = 0; i < pc; i++) {
++			zval_ptr_dtor(&params[i]);
++		}
++		efree(params);
++		zend_string_release(method);
++		return;
++	}
++
++	/* 2) No refinement: fall back to a normal method call on objects, preserving
++	 *    the caller's class scope so private/protected visibility still works. */
++	if (Z_TYPE_P(recv) == IS_OBJECT) {
++		zend_execute_data *caller = EX(prev_execute_data);
++		zend_class_entry *caller_scope = (caller && caller->func) ? caller->func->common.scope : NULL;
++		zend_class_entry *orig_fake = EG(fake_scope);
++		EG(fake_scope) = caller_scope;
++		zval fname;
++		ZVAL_STR(&fname, method);
++		call_user_function(NULL, recv, &fname, return_value, extra_count, extra);
++		EG(fake_scope) = orig_fake;
++		zend_string_release(method);
++		return;
++	}
++
++	/* 3) Scalar with no matching refinement — same shape as a normal bad call. */
++	zend_throw_error(NULL, "Call to undefined method %s() on %s",
++		ZSTR_VAL(method), zend_zval_type_name(recv));
++	zend_string_release(method);
++	RETURN_THROWS();
++}
++
++void zend_register_refinements(void)
++{
++	zend_register_functions(NULL, ext_functions, NULL, MODULE_PERSISTENT);
++}
+diff --git a/Zend/zend_refinements.h b/Zend/zend_refinements.h
+new file mode 100644
+index 00000000..8bfc490e
+--- /dev/null
++++ b/Zend/zend_refinements.h
+@@ -0,0 +1,18 @@
++/*
++   +----------------------------------------------------------------------+
++   | Runtime dispatch for `refinement`/`using` (scoped extension methods). |
++   +----------------------------------------------------------------------+
++*/
++
++#ifndef ZEND_REFINEMENTS_H
++#define ZEND_REFINEMENTS_H
++
++#include "zend.h"
++
++BEGIN_EXTERN_C()
++
++void zend_register_refinements(void);
++
++END_EXTERN_C()
++
++#endif /* ZEND_REFINEMENTS_H */
+diff --git a/Zend/zend_refinements.stub.php b/Zend/zend_refinements.stub.php
+new file mode 100644
+index 00000000..d01c32bb
+--- /dev/null
++++ b/Zend/zend_refinements.stub.php
+@@ -0,0 +1,11 @@
++<?php
++
++/** @generate-class-entries */
++
++/**
++ * Internal dispatcher for refined method calls. The compiler rewrites
++ * `$recv->m($a, $b)` (in a file with active `using`) to
++ * `__refine_call($recv, "m", [<active refinements>], $a, $b)`. Not intended to be
++ * called directly.
++ */
++function __refine_call(mixed $recv, string $method, array $refinements, mixed ...$args): mixed {}
+diff --git a/Zend/zend_refinements_arginfo.h b/Zend/zend_refinements_arginfo.h
+new file mode 100644
+index 00000000..dd22be03
+--- /dev/null
++++ b/Zend/zend_refinements_arginfo.h
+@@ -0,0 +1,16 @@
++/* This is a generated file, edit the .stub.php file instead.
++ * Stub hash: 4903f1fdd8799394408558fdeaa94bd664f49b6f */
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo___refine_call, 0, 3, IS_MIXED, 0)
++	ZEND_ARG_TYPE_INFO(0, recv, IS_MIXED, 0)
++	ZEND_ARG_TYPE_INFO(0, method, IS_STRING, 0)
++	ZEND_ARG_TYPE_INFO(0, refinements, IS_ARRAY, 0)
++	ZEND_ARG_VARIADIC_TYPE_INFO(0, args, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_FUNCTION(__refine_call);
++
++static const zend_function_entry ext_functions[] = {
++	ZEND_FE(__refine_call, arginfo___refine_call)
++	ZEND_FE_END
++};
+diff --git a/configure.ac b/configure.ac
+index d71eb21b..2e6ebabd 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1745,6 +1745,7 @@ PHP_ADD_SOURCES([Zend], m4_normalize([
+     zend_constants.c
+     zend_cpuinfo.c
+     zend_default_classes.c
++    zend_refinements.c
+     zend_dtrace.c
+     zend_enum.c
+     zend_exceptions.c

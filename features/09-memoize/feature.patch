@@ -1,0 +1,215 @@
+diff --git a/Zend/tests/memoize.phpt b/Zend/tests/memoize.phpt
+new file mode 100644
+index 00000000..edb6fb21
+--- /dev/null
++++ b/Zend/tests/memoize.phpt
+@@ -0,0 +1,40 @@
++--TEST--
++#[Memoize] executable decorator — caches results, recursion included
++--FILE--
++<?php
++// The body executes once per distinct argument, so an exponential recursive
++// fib runs linearly (recursion re-enters through the memoized name).
++$GLOBALS['calls'] = 0;
++#[Memoize]
++function fib(int $n): int {
++    $GLOBALS['calls']++;
++    return $n < 2 ? $n : fib($n - 1) + fib($n - 2);
++}
++echo fib(30), "\n";
++echo $GLOBALS['calls'], "\n";   // 31 distinct n in 0..30, each computed once
++
++// Correctness and per-argument caching.
++#[Memoize]
++function add(int $a, int $b): int { return $a + $b; }
++echo add(1, 2), add(3, 4), add(1, 2), "\n";
++
++// Default and named arguments are forwarded through the wrapper.
++#[Memoize]
++function g(int $x, int $y = 10): int { return $x - $y; }
++echo g(5), "\n";          // 5 - 10
++echo g(5, 1), "\n";       // 5 - 1
++echo g(y: 1, x: 20), "\n";
++
++// A function without #[Memoize] keeps its exact signature (not wrapped).
++function plain(int $a, int $b = 5): int { return $a + $b; }
++$r = new ReflectionFunction('plain');
++echo $r->getNumberOfParameters(), " ", plain(2), "\n";
++?>
++--EXPECT--
++832040
++31
++373
++-5
++4
++19
++2 7
+diff --git a/Zend/tests/memoize_comprehensive.phpt b/Zend/tests/memoize_comprehensive.phpt
+new file mode 100644
+index 00000000..6e75aaa3
+--- /dev/null
++++ b/Zend/tests/memoize_comprehensive.phpt
+@@ -0,0 +1,34 @@
++--TEST--
++Memoize — caching, recursion, arg keying, defaults/named, untouched
++--FILE--
++<?php
++$calls = 0;
++#[Memoize]
++function slow(int $n): int { global $calls; $calls++; return $n * 2; }
++echo slow(5), " ", slow(5), " ", slow(5), "\n"; // body once
++echo "calls=$calls\n";
++// recursion runs linearly
++$fibcalls = 0;
++#[Memoize]
++function fib(int $n): int { global $fibcalls; $fibcalls++; return $n < 2 ? $n : fib($n-1) + fib($n-2); }
++echo fib(30), "\n";
++echo "fib bodies=$fibcalls\n"; // ~31, not exponential
++// distinct args cached separately
++#[Memoize]
++function add(int $a, int $b): int { return $a + $b; }
++echo add(1,2), " ", add(2,1), " ", add(1,2), "\n";
++// default + named args forwarded
++#[Memoize]
++function greet(string $who, string $sep = ": "): string { return "hi{$sep}{$who}"; }
++echo greet("a"), " | ", greet("b", sep: "! "), "\n";
++// non-memoized functions untouched
++function plain(int $n): int { return $n; }
++echo plain(7), "\n";
++--EXPECT--
++10 10 10
++calls=1
++832040
++fib bodies=31
++3 3 3
++hi: a | hi! b
++7
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..92b926a9 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -8432,12 +8432,124 @@ static zend_string *zend_begin_func_decl(znode *result, zend_op_array *op_array,
+ }
+ /* }}} */
+ 
++/* --- `#[Memoize]` executable decorator (compile-time wrap) --- */
++
++static zend_ast *memo_var(const char *n) /* {{{ */
++{
++	return zend_ast_create(ZEND_AST_VAR,
++		zend_ast_create_zval_from_str(zend_string_init(n, strlen(n), 0)));
++}
++/* }}} */
++
++static zend_ast *memo_name_call(const char *name, zend_ast *arglist) /* {{{ */
++{
++	zend_ast *fname = zend_ast_create_zval_from_str(zend_string_init(name, strlen(name), 0));
++	fname->attr = ZEND_NAME_FQ;
++	return zend_ast_create(ZEND_AST_CALL, fname, arglist);
++}
++/* }}} */
++
++static bool ast_attr_list_has_memoize(zend_ast *attr_list) /* {{{ */
++{
++	zend_ast_list *list = zend_ast_get_list(attr_list);
++	for (uint32_t g = 0; g < list->children; g++) {
++		zend_ast_list *group = zend_ast_get_list(list->child[g]);
++		for (uint32_t i = 0; i < group->children; i++) {
++			zend_string *nm = zend_ast_get_str(group->child[i]->child[0]);
++			if (zend_string_equals_literal_ci(nm, "Memoize")
++			 || zend_string_equals_literal_ci(nm, "\\Memoize")) {
++				return true;
++			}
++		}
++	}
++	return false;
++}
++/* }}} */
++
++/* Rewrite a plain `#[Memoize] function f(P): R { B }` into a memoizing wrapper:
++ *
++ *   function f(...$__args) {
++ *       static $__memo = [];
++ *       $__key = \serialize($__args);
++ *       if (\array_key_exists($__key, $__memo)) return $__memo[$__key];
++ *       $__memo[$__key] = (function (P): R { B })(...$__args);
++ *       return $__memo[$__key];
++ *   }
++ *
++ * The original params/body/return-type move into an inner closure; the wrapper's
++ * request-scoped `static $__memo` caches results by serialized arguments. Recursive
++ * calls go through the public name, so they hit the cache too. */
++static bool zend_try_memoize_wrap(zend_ast_decl *decl) /* {{{ */
++{
++	if (decl->kind != ZEND_AST_FUNC_DECL || !decl->child[4]) {
++		return false;
++	}
++	if (!ast_attr_list_has_memoize(decl->child[4])) {
++		return false;
++	}
++
++	uint32_t lineno = decl->start_lineno;
++
++	/* inner closure holds the original params, body and return type */
++	zend_ast *inner = zend_ast_create_decl(ZEND_AST_CLOSURE, 0, lineno,
++		NULL, NULL, decl->child[0], NULL, decl->child[2], decl->child[3], NULL);
++
++	/* wrapper params: (...$__args) */
++	zend_ast *vparam = zend_ast_create_ex(ZEND_AST_PARAM, ZEND_PARAM_VARIADIC,
++		NULL, zend_ast_create_zval_from_str(zend_string_init("__args", sizeof("__args") - 1, 0)),
++		NULL, NULL, NULL, NULL);
++	zend_ast *wrap_params = zend_ast_create_list(1, ZEND_AST_PARAM_LIST, vparam);
++
++	/* static $__memo = []; */
++	zend_ast *memo_static = zend_ast_create_list(1, ZEND_AST_STMT_LIST,
++		zend_ast_create(ZEND_AST_STATIC,
++			zend_ast_create_zval_from_str(zend_string_init("__memo", sizeof("__memo") - 1, 0)),
++			zend_ast_create_list(0, ZEND_AST_ARRAY)));
++
++	/* $__key = \serialize($__args); */
++	zend_ast *assign_key = zend_ast_create(ZEND_AST_ASSIGN, memo_var("__key"),
++		memo_name_call("serialize", zend_ast_create_list(1, ZEND_AST_ARG_LIST, memo_var("__args"))));
++
++	/* if (\array_key_exists($__key, $__memo)) return $__memo[$__key]; */
++	zend_ast *ake = memo_name_call("array_key_exists",
++		zend_ast_create_list(2, ZEND_AST_ARG_LIST, memo_var("__key"), memo_var("__memo")));
++	zend_ast *if_stmt = zend_ast_create_list(1, ZEND_AST_IF,
++		zend_ast_create(ZEND_AST_IF_ELEM, ake,
++			zend_ast_create(ZEND_AST_RETURN,
++				zend_ast_create(ZEND_AST_DIM, memo_var("__memo"), memo_var("__key")))));
++
++	/* $__memo[$__key] = $inner(...$__args); */
++	zend_ast *inner_call = zend_ast_create(ZEND_AST_CALL, inner,
++		zend_ast_create_list(1, ZEND_AST_ARG_LIST,
++			zend_ast_create(ZEND_AST_UNPACK, memo_var("__args"))));
++	zend_ast *assign_memo = zend_ast_create(ZEND_AST_ASSIGN,
++		zend_ast_create(ZEND_AST_DIM, memo_var("__memo"), memo_var("__key")), inner_call);
++
++	/* return $__memo[$__key]; */
++	zend_ast *ret_final = zend_ast_create(ZEND_AST_RETURN,
++		zend_ast_create(ZEND_AST_DIM, memo_var("__memo"), memo_var("__key")));
++
++	zend_ast *body = zend_ast_create_list(0, ZEND_AST_STMT_LIST);
++	body = zend_ast_list_add(body, memo_static);
++	body = zend_ast_list_add(body, assign_key);
++	body = zend_ast_list_add(body, if_stmt);
++	body = zend_ast_list_add(body, assign_memo);
++	body = zend_ast_list_add(body, ret_final);
++
++	decl->child[0] = wrap_params;
++	decl->child[2] = body;
++	decl->child[3] = NULL;
++	return true;
++}
++/* }}} */
++
+ static zend_op_array *zend_compile_func_decl_ex(
+ 	znode *result, zend_ast *ast, enum func_decl_level level,
+ 	zend_string *property_info_name,
+ 	zend_property_hook_kind hook_kind
+ ) {
+ 	zend_ast_decl *decl = (zend_ast_decl *) ast;
++	zend_try_memoize_wrap(decl);
+ 	zend_ast *params_ast = decl->child[0];
+ 	zend_ast *uses_ast = decl->child[1];
+ 	zend_ast *stmt_ast = decl->child[2];
