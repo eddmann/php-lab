@@ -152,4 +152,21 @@ echo fact_iter(1000000, 0), "\\n";
 function fib(int $n): int { return $n < 2 ? $n : fib($n - 1) + fib($n - 2); }
 echo fib(20), "\\n";
 `,
+  '13-placeholder': `<?php
+// A bare \`_\` in a call argument becomes a closure — one param per \`_\`.
+print_r(array_map(_ * 2, [1, 2, 3]));       // fn($p) => $p * 2
+
+$xs = [3, 1, 2];
+usort($xs, _ <=> _);                          // fn($a, $b) => $a <=> $b
+print_r($xs);
+
+echo array_reduce([1, 2, 3, 4], _ + _, 0), "\\n";
+
+// Nested pipelines: each \`_\` binds to its own (innermost) call.
+print_r(array_map(_ + 1, array_map(_ * 10, [1, 2, 3])));
+
+// Captures surrounding variables by value (arrow-fn semantics).
+$k = 100;
+print_r(array_map(_ + $k, [1, 2]));
+`,
 };

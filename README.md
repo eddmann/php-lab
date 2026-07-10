@@ -11,7 +11,8 @@ tests on its own.
 
 ## Features
 
-Ideas borrowed from Rust, Scala, Go, Ruby, Kotlin, Clojure, Scheme, JS, C#, and Python:
+Ideas borrowed from Rust, Scala, Go, Ruby, Kotlin, Clojure, Scheme, JS, C#, Python,
+and Raku:
 
 | # | Feature | From | Folder |
 |---|---------|------|--------|
@@ -27,6 +28,7 @@ Ideas borrowed from Rust, Scala, Go, Ruby, Kotlin, Clojure, Scheme, JS, C#, and 
 | 10 | Refinements — scoped extension methods | Ruby | [10-refinements](features/10-refinements/) |
 | 11 | Context parameters — `context`/`provide` | Scala | [11-context](features/11-context/) |
 | 12 | `recur` + automatic self-TCO — constant-stack tail recursion | Clojure/Scheme | [12-recur](features/12-recur/) |
+| 13 | Placeholder lambdas — `_` implicit params | Scala/Raku | [13-placeholder](features/13-placeholder/) |
 
 Each folder holds `feature.patch`, a `README.md` writeup, an `RFC.md` proposal, a
 `tests/` suite, and `smoke.sh`.

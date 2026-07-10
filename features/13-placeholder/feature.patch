@@ -1,0 +1,327 @@
+diff --git a/Zend/tests/placeholder.phpt b/Zend/tests/placeholder.phpt
+new file mode 100644
+index 00000000..b71b5530
+--- /dev/null
++++ b/Zend/tests/placeholder.phpt
+@@ -0,0 +1,76 @@
++--TEST--
++placeholder lambdas: bare `_` in a call argument becomes a closure
++--FILE--
++<?php
++// One placeholder -> one-parameter closure.
++print_r(array_map(_ * 2, [1, 2, 3]));
++
++// Two placeholders -> two parameters, left to right.
++$xs = [3, 1, 2];
++usort($xs, _ <=> _);
++print_r($xs);
++
++// Predicate position.
++print_r(array_filter([-1, 0, 1, 2], _ > 0));
++
++// Repeated placeholder as a binary reducer.
++echo array_reduce([1, 2, 3, 4], _ + _, 0), "\n";
++
++// Nested pipeline: each inner `_` binds to its own (innermost) call argument.
++print_r(array_map(_ + 1, array_map(_ * 10, [1, 2, 3])));
++
++// The closure captures surrounding variables by value (arrow-fn semantics).
++$k = 100;
++print_r(array_map(_ + $k, [1, 2]));
++
++// A placeholder may be the receiver of a method call.
++class Box {
++    public function __construct(public int $v) {}
++    public function doubled(): int { return $this->v * 2; }
++}
++print_r(array_map(_->doubled(), [new Box(5), new Box(6)]));
++
++// A bare `_` as a plain argument becomes the identity closure.
++$id = array_map(_, [7, 8]);
++print_r($id);
++?>
++--EXPECT--
++Array
++(
++    [0] => 2
++    [1] => 4
++    [2] => 6
++)
++Array
++(
++    [0] => 1
++    [1] => 2
++    [2] => 3
++)
++Array
++(
++    [2] => 1
++    [3] => 2
++)
++10
++Array
++(
++    [0] => 11
++    [1] => 21
++    [2] => 31
++)
++Array
++(
++    [0] => 101
++    [1] => 102
++)
++Array
++(
++    [0] => 10
++    [1] => 12
++)
++Array
++(
++    [0] => 7
++    [1] => 8
++)
+diff --git a/Zend/tests/placeholder_comprehensive.phpt b/Zend/tests/placeholder_comprehensive.phpt
+new file mode 100644
+index 00000000..3ca046a2
+--- /dev/null
++++ b/Zend/tests/placeholder_comprehensive.phpt
+@@ -0,0 +1,69 @@
++--TEST--
++placeholder lambdas: boundaries, predicates, named args, nesting, non-interference
++--FILE--
++<?php
++// Larger operator expression with one placeholder (the whole argument is the body).
++print_r(array_map(_ * 3 + 1, [1, 2, 3]));
++
++// Boolean predicate.
++print_r(array_values(array_filter(range(1, 6), _ % 2 === 0)));
++
++// Two placeholders form a comparator.
++$xs = [5, 2, 8, 1];
++usort($xs, _ <=> _);
++echo implode(',', $xs), "\n";
++
++// Nested calls: inner `_` binds to the inner call, outer to the outer.
++print_r(array_map(_ - 1, array_map(_ * 10, [1, 2, 3])));
++
++// Placeholder inside a named argument.
++function twice(callable $f, int $x): int { return $f($f($x)); }
++echo twice(f: _ + 5, x: 0), "\n";
++
++// A user function literally named `_` is a call, not a placeholder.
++function _(string $s): string { return "[$s]"; }
++echo _("x"), "\n";
++
++// Placeholder as a method-call receiver.
++class Money {
++    public function __construct(public int $cents) {}
++    public function dollars(): float { return $this->cents / 100; }
++}
++print_r(array_map(_->dollars(), [new Money(150), new Money(250)]));
++
++// Ternary body.
++print_r(array_map(_ > 0 ? "pos" : "nonpos", [-1, 0, 3]));
++?>
++--EXPECT--
++Array
++(
++    [0] => 4
++    [1] => 7
++    [2] => 10
++)
++Array
++(
++    [0] => 2
++    [1] => 4
++    [2] => 6
++)
++1,2,5,8
++Array
++(
++    [0] => 9
++    [1] => 19
++    [2] => 29
++)
++10
++[x]
++Array
++(
++    [0] => 1.5
++    [1] => 2.5
++)
++Array
++(
++    [0] => nonpos
++    [1] => nonpos
++    [2] => pos
++)
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..e5651dcd 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -3711,6 +3711,156 @@ static uint32_t zend_get_arg_num(zend_function *fn, zend_string *arg_name) {
+ 	return (uint32_t) -1;
+ }
+ 
++/* --- Placeholder lambdas (Scala `_` / Raku Whatever `*`) ------------------
++ * A bare `_` used inside a call argument turns that whole argument into a
++ * closure, with one fresh parameter per `_` in left-to-right order:
++ *
++ *     array_map(_ * 2, $xs)   =>  array_map(fn($__ph0) => $__ph0 * 2, $xs)
++ *     usort($xs, _ <=> _)     =>  usort($xs, fn($__ph0, $__ph1) => $__ph0 <=> $__ph1)
++ *
++ * Placeholders sitting inside a *nested* call's argument list bind to that
++ * inner call instead, so pipelines compose naturally:
++ *
++ *     array_map(_ + 1, array_map(_ * 10, $xs))
++ *
++ * This is a pure front-end AST desugar in the compiler: no new tokens, no new
++ * opcodes. A bare `_` is an ordinary unqualified `ZEND_AST_CONST`; we detect it
++ * and, in place, rewrite it into a `$__phN` variable node. */
++
++static bool zend_ast_is_placeholder(zend_ast *ast)
++{
++	zend_ast *name;
++	const zval *zv;
++
++	if (ast == NULL || ast->kind != ZEND_AST_CONST) {
++		return 0;
++	}
++	name = ast->child[0];
++	if (name->kind != ZEND_AST_ZVAL || name->attr == ZEND_NAME_FQ) {
++		return 0;
++	}
++	zv = zend_ast_get_zval(name);
++	return Z_TYPE_P(zv) == IS_STRING && zend_string_equals_literal(Z_STR_P(zv), "_");
++}
++
++/* The child index holding a call-like node's argument list (a deeper
++ * placeholder boundary), or -1 for anything else. */
++static int zend_placeholder_arg_child(const zend_ast *ast)
++{
++	switch (ast->kind) {
++		case ZEND_AST_CALL:
++		case ZEND_AST_NEW:
++			return 1;
++		case ZEND_AST_METHOD_CALL:
++		case ZEND_AST_NULLSAFE_METHOD_CALL:
++		case ZEND_AST_STATIC_CALL:
++			return 2;
++		default:
++			return -1;
++	}
++}
++
++/* Walk `*astp`, rewriting each placeholder `_` in place into `$__ph<n>` (n
++ * increasing in source order) and returning how many were found. Does not
++ * descend into own-scope nodes (closures, arrow funcs, classes) or into a
++ * nested call's argument list. With rewrite == false it only counts. */
++static uint32_t zend_lift_placeholders(zend_ast **astp, uint32_t *next, bool rewrite)
++{
++	zend_ast *ast = *astp;
++	uint32_t found = 0;
++	int skip;
++
++	if (ast == NULL) {
++		return 0;
++	}
++	if (zend_ast_is_placeholder(ast)) {
++		if (rewrite) {
++			zend_ast *name = ast->child[0];
++			zval *zv = zend_ast_get_zval(name);
++			zend_string *old = Z_STR_P(zv);
++			char buf[16];
++			size_t len = (size_t) snprintf(buf, sizeof(buf), "__ph%u", *next);
++
++			ZVAL_STR(zv, zend_string_init(buf, len, 0));
++			zend_string_release(old);
++			name->attr = 0;
++			ast->kind = ZEND_AST_VAR;
++		}
++		(*next)++;
++		return 1;
++	}
++	/* Special nodes cover ZVAL/CONSTANT leaves *and* every declaration node
++	 * (closures, arrow funcs, classes) — none of which we descend into. */
++	if (zend_ast_is_special(ast)) {
++		return 0;
++	}
++
++	skip = zend_placeholder_arg_child(ast);
++	if (zend_ast_is_list(ast)) {
++		zend_ast_list *list = zend_ast_get_list(ast);
++		for (uint32_t i = 0; i < list->children; i++) {
++			found += zend_lift_placeholders(&list->child[i], next, rewrite);
++		}
++	} else {
++		uint32_t n = zend_ast_get_num_children(ast);
++		for (uint32_t i = 0; i < n; i++) {
++			if ((int) i == skip) {
++				continue;
++			}
++			found += zend_lift_placeholders(&ast->child[i], next, rewrite);
++		}
++	}
++	return found;
++}
++
++/* Wrap `body` in an arrow function `fn($__ph0, ...) => body` with `nparams`
++ * auto-capturing parameters (arrow funcs import outer variables by value). */
++static zend_ast *zend_placeholder_make_closure(zend_ast *body, uint32_t nparams)
++{
++	zend_ast *params = zend_ast_create_list(0, ZEND_AST_PARAM_LIST);
++	uint32_t i;
++
++	for (i = 0; i < nparams; i++) {
++		char buf[16];
++		size_t len = (size_t) snprintf(buf, sizeof(buf), "__ph%u", i);
++		zend_ast *param = zend_ast_create_ex(ZEND_AST_PARAM, 0,
++			/* type        */ NULL,
++			/* name        */ zend_ast_create_zval_from_str(zend_string_init(buf, len, 0)),
++			/* default     */ NULL,
++			/* (unused)    */ NULL,
++			/* doc_comment */ NULL,
++			/* hooks       */ NULL);
++		params = zend_ast_list_add(params, param);
++	}
++
++	return zend_ast_create_decl(ZEND_AST_ARROW_FUNC, /* flags */ 0,
++		body->lineno, /* doc_comment */ NULL, /* name */ NULL,
++		/* params */ params, /* uses */ NULL, /* body */ body,
++		/* return_type */ NULL, /* child4 */ NULL);
++}
++
++/* Turn any argument containing top-level placeholders into a closure. */
++static void zend_compile_placeholder_args(zend_ast_list *args)
++{
++	uint32_t i;
++
++	for (i = 0; i < args->children; i++) {
++		zend_ast **argp = &args->child[i];
++		zend_ast **valp;
++		uint32_t count, next = 0;
++
++		if (*argp == NULL || (*argp)->kind == ZEND_AST_UNPACK) {
++			continue; /* leave `...$spread` alone */
++		}
++		valp = ((*argp)->kind == ZEND_AST_NAMED_ARG) ? &(*argp)->child[1] : argp;
++
++		count = zend_lift_placeholders(valp, &next, /* rewrite */ true);
++		if (count > 0) {
++			*valp = zend_placeholder_make_closure(*valp, count);
++		}
++	}
++}
++
+ static uint32_t zend_compile_args(
+ 		zend_ast *ast, zend_function *fbc, bool *may_have_extra_named_args) /* {{{ */
+ {
+@@ -3719,6 +3869,8 @@ static uint32_t zend_compile_args(
+ 	bool uses_arg_unpack = 0;
+ 	uint32_t arg_count = 0; /* number of arguments not including unpacks */
+ 
++	zend_compile_placeholder_args(args);
++
+ 	/* Whether named arguments are used syntactically, to enforce language level limitations.
+ 	 * May not actually use named argument passing. */
+ 	bool uses_named_args = 0;
