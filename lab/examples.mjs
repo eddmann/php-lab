@@ -206,4 +206,26 @@ var_dump(10 > mid() > 1);      // prints mid() once, then true
 
 // The equality tier is unchanged: 1 == 1 == 1 is still a parse error.
 `,
+  '16-spread-dot': `<?php
+class User {
+    public function __construct(public string $name, public int $age) {}
+    public function greet(): string { return "hi {$this->name}"; }
+}
+$users = [new User("ada", 36), new User("bob", 40)];
+
+// Call a method on every element, collecting the results.
+print_r($users*->greet());     // ["hi ada", "hi bob"]
+
+// Read a property from every element (keys are preserved).
+print_r($users*->name);        // ["ada", "bob"]
+
+// Chains: each stage maps and yields an array.
+class Box {
+    public function __construct(public int $v) {}
+    public function inc(): Box { return new Box($this->v + 1); }
+    public function get(): int { return $this->v; }
+}
+$xs = [new Box(1), new Box(2), new Box(3)];
+print_r($xs*->inc()*->get());  // [2, 3, 4]
+`,
 };

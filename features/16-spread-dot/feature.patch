@@ -1,0 +1,231 @@
+diff --git a/Zend/tests/grammar/alternative_offset_syntax_in_encaps_string.phpt b/Zend/tests/grammar/alternative_offset_syntax_in_encaps_string.phpt
+index 83163487..6c859b94 100644
+--- a/Zend/tests/grammar/alternative_offset_syntax_in_encaps_string.phpt
++++ b/Zend/tests/grammar/alternative_offset_syntax_in_encaps_string.phpt
+@@ -3,4 +3,4 @@
+ --FILE--
+ <?php "{$g{'h'}}"; ?>
+ --EXPECTF--
+-Parse error: syntax error, unexpected token "{", expecting "->" or "?->" or "[" in %s on line %d
++Parse error: syntax error, unexpected token "{", expecting "->" or "?->" or "*->" or "[" in %s on line %d
+diff --git a/Zend/tests/new_without_parentheses/unset_new.phpt b/Zend/tests/new_without_parentheses/unset_new.phpt
+index a176b6d0..ec8583c0 100644
+--- a/Zend/tests/new_without_parentheses/unset_new.phpt
++++ b/Zend/tests/new_without_parentheses/unset_new.phpt
+@@ -7,4 +7,4 @@
+ 
+ ?>
+ --EXPECTF--
+-Parse error: syntax error, unexpected token ")", expecting "->" or "?->" or "[" in %s on line %d
++Parse error: syntax error, unexpected token ")", expecting "->" or "?->" or "*->" or "[" in %s on line %d
+diff --git a/Zend/tests/spread_dot.phpt b/Zend/tests/spread_dot.phpt
+new file mode 100644
+index 00000000..8a85ee5f
+--- /dev/null
++++ b/Zend/tests/spread_dot.phpt
+@@ -0,0 +1,63 @@
++--TEST--
++spread-dot: $coll*->m() maps a method (or property) over every element
++--FILE--
++<?php
++class User {
++    public function __construct(public string $name, public int $age) {}
++    public function greet(): string { return "hi {$this->name}"; }
++    public function agePlus(int $by): int { return $this->age + $by; }
++}
++
++$users = [new User("ada", 36), new User("bob", 40)];
++
++// Method call across every element.
++print_r($users*->greet());
++
++// Method call with an argument.
++print_r($users*->agePlus(10));
++
++// Property read across every element.
++print_r($users*->name);
++print_r($users*->age);
++
++// Keys are preserved.
++$map = ["x" => new User("cy", 20), "y" => new User("di", 25)];
++print_r($map*->name);
++
++// Empty collection maps to an empty array.
++var_dump([]*->greet());
++
++// Multiplication / power / *= are unaffected by the new *-> token.
++echo 6 * 7, " ", 2 ** 10, "\n";
++$n = 4; $n *= 3; echo $n, "\n";
++?>
++--EXPECT--
++Array
++(
++    [0] => hi ada
++    [1] => hi bob
++)
++Array
++(
++    [0] => 46
++    [1] => 50
++)
++Array
++(
++    [0] => ada
++    [1] => bob
++)
++Array
++(
++    [0] => 36
++    [1] => 40
++)
++Array
++(
++    [x] => cy
++    [y] => di
++)
++array(0) {
++}
++42 1024
++12
+diff --git a/Zend/tests/spread_dot_comprehensive.phpt b/Zend/tests/spread_dot_comprehensive.phpt
+new file mode 100644
+index 00000000..b56efed9
+--- /dev/null
++++ b/Zend/tests/spread_dot_comprehensive.phpt
+@@ -0,0 +1,60 @@
++--TEST--
++spread-dot: chaining, namespaces, parenthesised operands, evaluation model
++--FILE--
++<?php
++namespace App;
++
++class Box {
++    public function __construct(public int $v) {}
++    public function inc(): Box { return new Box($this->v + 1); }
++    public function get(): int { return $this->v; }
++}
++
++// Chaining: each stage maps and yields an array, which the next stage maps again.
++$xs = [new Box(1), new Box(2), new Box(3)];
++print_r($xs*->inc()*->inc()*->get());   // [3, 4, 5]
++
++// Works from a namespaced call site (the desugar targets global array_map).
++class Person {
++    public function __construct(public string $name) {}
++    public function shout(): string { return \strtoupper($this->name); }
++}
++print_r([new Person("a"), new Person("b")]*->shout());
++
++// The collection operand may itself be an expression.
++function makeBoxes(): array { return [new Box(10), new Box(20)]; }
++print_r((makeBoxes())*->get());
++
++// The method is invoked once per element, in order.
++class Counter {
++    public function __construct(public int $id) {}
++    public function tick(): int { echo "tick{$this->id} "; return $this->id; }
++}
++$r = [new Counter(1), new Counter(2), new Counter(3)]*->tick();
++echo "\n";
++print_r($r);
++?>
++--EXPECT--
++Array
++(
++    [0] => 3
++    [1] => 4
++    [2] => 5
++)
++Array
++(
++    [0] => A
++    [1] => B
++)
++Array
++(
++    [0] => 10
++    [1] => 20
++)
++tick1 tick2 tick3 
++Array
++(
++    [0] => 1
++    [1] => 2
++    [2] => 3
++)
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..a81ccc94 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -32,6 +32,29 @@
+ #define yytnamerr zend_yytnamerr
+ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ 
++/* Spread-dot (Groovy `*->`): `$coll*->m(args)` maps a method (or `$coll*->p` a
++ * property) over every element, collecting the results. Desugars to
++ * `array_map(fn($__each) => $__each->m(args), $coll)`. `args` == NULL builds the
++ * property form. Pure parser sugar — reuses array_map, an arrow function and an
++ * ordinary method-call/property node; no new opcode. */
++static zend_ast *zend_ast_create_spread_map(zend_ast *coll, zend_ast *member, zend_ast *args) {
++	zend_string *pname = zend_string_init("__each", sizeof("__each") - 1, 0);
++	zend_ast *param = zend_ast_create_ex(ZEND_AST_PARAM, 0, NULL,
++		zend_ast_create_zval_from_str(zend_string_copy(pname)), NULL, NULL, NULL, NULL);
++	zend_ast *params = zend_ast_create_list(1, ZEND_AST_PARAM_LIST, param);
++	zend_ast *recv = zend_ast_create(ZEND_AST_VAR, zend_ast_create_zval_from_str(pname));
++	zend_ast *body = args
++		? zend_ast_create(ZEND_AST_METHOD_CALL, recv, member, args)
++		: zend_ast_create(ZEND_AST_PROP, recv, member);
++	zend_ast *fn = zend_ast_create_decl(ZEND_AST_ARROW_FUNC, 0, CG(zend_lineno), NULL, NULL,
++		params, NULL, body, NULL, NULL);
++	zend_ast *name = zend_ast_create_zval_from_str(
++		zend_string_init("array_map", sizeof("array_map") - 1, 0));
++	name->attr = ZEND_NAME_FQ;
++	return zend_ast_create(ZEND_AST_CALL, name,
++		zend_ast_create_list(2, ZEND_AST_ARG_LIST, fn, coll));
++}
++
+ #ifdef _MSC_VER
+ #define YYMALLOC malloc
+ #define YYFREE free
+@@ -221,6 +244,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token T_VOID_CAST   "'(void)'"
+ %token T_OBJECT_OPERATOR "'->'"
+ %token T_NULLSAFE_OBJECT_OPERATOR "'?->'"
++%token T_SPREAD_ARROW "'*->'"
+ %token T_DOUBLE_ARROW    "'=>'"
+ %token T_COMMENT         "comment"
+ %token T_DOC_COMMENT     "doc comment"
+@@ -1571,6 +1595,8 @@ callable_variable:
+ 			{ $$ = zend_ast_create(ZEND_AST_METHOD_CALL, $1, $3, $4); }
+ 	|	array_object_dereferenceable T_NULLSAFE_OBJECT_OPERATOR property_name argument_list
+ 			{ $$ = zend_ast_create(ZEND_AST_NULLSAFE_METHOD_CALL, $1, $3, $4); }
++	|	array_object_dereferenceable T_SPREAD_ARROW property_name argument_list
++			{ $$ = zend_ast_create_spread_map($1, $3, $4); }
+ 	|	function_call { $$ = $1; }
+ ;
+ 
+@@ -1583,6 +1609,8 @@ variable:
+ 			{ $$ = zend_ast_create(ZEND_AST_PROP, $1, $3); }
+ 	|	array_object_dereferenceable T_NULLSAFE_OBJECT_OPERATOR property_name
+ 			{ $$ = zend_ast_create(ZEND_AST_NULLSAFE_PROP, $1, $3); }
++	|	array_object_dereferenceable T_SPREAD_ARROW property_name
++			{ $$ = zend_ast_create_spread_map($1, $3, NULL); }
+ ;
+ 
+ simple_variable:
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..72a164fb 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1583,6 +1583,11 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_IMPLEMENTS);
+ }
+ 
++<ST_IN_SCRIPTING>"*->" {
++	yy_push_state(ST_LOOKING_FOR_PROPERTY);
++	RETURN_TOKEN(T_SPREAD_ARROW);
++}
++
+ <ST_IN_SCRIPTING>"->" {
+ 	yy_push_state(ST_LOOKING_FOR_PROPERTY);
+ 	RETURN_TOKEN(T_OBJECT_OPERATOR);
