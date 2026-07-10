@@ -191,4 +191,19 @@ class Named {
 }
 echo (new Named(3, 4))->len(), "\\n";          // method
 `,
+  '15-chained-comparisons': `<?php
+// a < b < c means a < b && b < c, each operand evaluated once.
+var_dump(1 < 2 < 3);           // true
+var_dump(3 < 2 < 1);           // false (short-circuits after 3 < 2)
+
+// The range idiom, the way maths writes it.
+$i = 5;
+var_dump(0 <= $i < 10);        // true
+
+// Operators may be mixed; the middle operand is evaluated only once.
+function mid() { echo "mid()\\n"; return 5; }
+var_dump(10 > mid() > 1);      // prints mid() once, then true
+
+// The equality tier is unchanged: 1 == 1 == 1 is still a parse error.
+`,
 };

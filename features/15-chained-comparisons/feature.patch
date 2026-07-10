@@ -1,0 +1,239 @@
+diff --git a/Zend/tests/chained_comparisons.phpt b/Zend/tests/chained_comparisons.phpt
+new file mode 100644
+index 00000000..ec298e5b
+--- /dev/null
++++ b/Zend/tests/chained_comparisons.phpt
+@@ -0,0 +1,48 @@
++--TEST--
++chained comparisons: a < b < c means a < b && b < c (Python-style)
++--FILE--
++<?php
++// Basic chains.
++var_dump(1 < 2 < 3);          // true
++var_dump(3 < 2 < 1);          // false  (3 < 2 fails)
++var_dump(1 < 5 < 3);          // false  (5 < 3 fails)
++var_dump(0 <= 5 < 10);        // true
++var_dump(10 > 5 > 1);         // true
++var_dump(1 <= 1 <= 1);        // true
++
++// Mixing relational operators within a chain.
++var_dump(5 > 3 < 4);          // true   (5 > 3 && 3 < 4)
++
++// The range idiom.
++$i = 5;
++var_dump(0 <= $i < 10);       // true
++$i = 15;
++var_dump(0 <= $i < 10);       // false
++
++// A four-operand chain.
++var_dump(1 < 2 < 3 < 4);      // true
++var_dump(1 < 2 < 9 < 4);      // false
++
++// The middle operand is evaluated exactly once.
++function mid(): int { echo "mid\n"; return 5; }
++var_dump(0 < mid() < 10);     // prints "mid" once, then true
++
++// Short-circuit: once a link fails, the rest is not evaluated.
++function rhs(): int { echo "rhs\n"; return 100; }
++var_dump(5 < 2 < rhs());      // 5 < 2 fails -> rhs() never called -> false
++?>
++--EXPECT--
++bool(true)
++bool(false)
++bool(false)
++bool(true)
++bool(true)
++bool(true)
++bool(true)
++bool(true)
++bool(false)
++bool(true)
++bool(false)
++mid
++bool(true)
++bool(false)
+diff --git a/Zend/tests/chained_comparisons_comprehensive.phpt b/Zend/tests/chained_comparisons_comprehensive.phpt
+new file mode 100644
+index 00000000..397626cf
+--- /dev/null
++++ b/Zend/tests/chained_comparisons_comprehensive.phpt
+@@ -0,0 +1,46 @@
++--TEST--
++chained comparisons: equality tier untouched, floats/strings, side effects, nesting
++--FILE--
++<?php
++// Non-breaking: the equality tier is still non-associative (a parse error),
++// and mixed precedence keeps its meaning: `1 < 2 == true` is `(1 < 2) == true`.
++var_dump(1 < 2 == true);      // true
++
++// Floats and strings compare as usual, just chained.
++var_dump(0.5 < 1.5 < 2.5);    // true
++var_dump("a" < "b" < "c");    // true
++
++// Descending chain with >= and >.
++$n = 7;
++var_dump(10 >= $n > 0);       // true
++
++// Each operand evaluated once, left to right; a failing early link stops the rest.
++$log = [];
++$f = function (string $tag, int $v) use (&$log) { $log[] = $tag; return $v; };
++$r = $f('a', 1) < $f('b', 9) < $f('c', 5) < $f('d', 100);
++var_dump($r);                 // 1<9 true, 9<5 false -> false; 'd' never evaluated
++echo implode(',', $log), "\n";// a,b,c
++
++// A chain used inside a larger boolean expression.
++$x = 5;
++var_dump(($x > 0) && (0 < $x < 10));   // true
++
++// Guard-style usage.
++function clamp(int $v): string {
++    return 0 <= $v < 100 ? "in range" : "out";
++}
++echo clamp(50), "\n";
++echo clamp(150), "\n";
++echo clamp(-1), "\n";
++?>
++--EXPECT--
++bool(true)
++bool(true)
++bool(true)
++bool(true)
++bool(false)
++a,b,c
++bool(true)
++in range
++out
++out
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..4ef85911 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -10206,6 +10206,85 @@ static bool zend_try_ct_eval_array(zval *result, zend_ast *ast) /* {{{ */
+ }
+ /* }}} */
+ 
++/* --- Chained comparisons (Python) -----------------------------------------
++ * The relational operators `< <= > >=` are left-associative in this fork, so
++ * `a < b <= c` parses as `((a < b) <= c)`. Instead of comparing a boolean with
++ * `c`, we lower a run of them to Python's chained form:
++ *
++ *     a < b <= c   ==>   a < ($t1 = b) && $t1 <= c
++ *
++ * Each operand is evaluated exactly once, left to right, and the chain
++ * short-circuits (a failed link skips the rest). Built purely from ordinary
++ * &&, comparison and assignment AST nodes plus hidden write-once temporaries
++ * (NUL-prefixed, interned, unreachable from userland). */
++
++static bool zend_ast_is_relational(zend_ast *ast)
++{
++	if (ast->kind == ZEND_AST_GREATER || ast->kind == ZEND_AST_GREATER_EQUAL) {
++		return 1;
++	}
++	return ast->kind == ZEND_AST_BINARY_OP
++		&& (ast->attr == ZEND_IS_SMALLER || ast->attr == ZEND_IS_SMALLER_OR_EQUAL);
++}
++
++/* Build a comparison of the same operator as `proto` over fresh operands. */
++static zend_ast *zend_make_relational(zend_ast *proto, zend_ast *lhs, zend_ast *rhs)
++{
++	if (proto->kind == ZEND_AST_BINARY_OP) {
++		return zend_ast_create_binary_op(proto->attr, lhs, rhs);
++	}
++	return zend_ast_create(proto->kind, lhs, rhs); /* GREATER / GREATER_EQUAL */
++}
++
++static zend_ast *zend_chain_temp_var(uint32_t idx)
++{
++	char buf[16];
++	size_t len;
++	zend_string *name;
++
++	buf[0] = '\0'; /* NUL prefix: no userland variable can name it */
++	len = 1 + (size_t) snprintf(buf + 1, sizeof(buf) - 1, "cmp%u", idx);
++	name = zend_new_interned_string(zend_string_init(buf, len, 0));
++	return zend_ast_create(ZEND_AST_VAR, zend_ast_create_zval_from_str(name));
++}
++
++/* If `ast` tops a relational chain (its left operand is itself relational),
++ * return the desugared && tree; otherwise NULL. */
++static zend_ast *zend_desugar_comparison_chain(zend_ast *ast)
++{
++	zend_ast *links[64];
++	uint32_t n = 0, i;
++	zend_ast *node = ast;
++	zend_ast *chain = NULL;
++
++	if (!zend_ast_is_relational(ast) || !zend_ast_is_relational(ast->child[0])) {
++		return NULL;
++	}
++
++	/* Collect the comparison nodes down the left spine (outer-most first). */
++	while (zend_ast_is_relational(node) && n < (uint32_t)(sizeof(links) / sizeof(links[0]))) {
++		links[n++] = node;
++		node = node->child[0];
++	}
++
++	/* Emit clauses left to right. Clause at position `pos` compares operand
++	 * `pos` with operand `pos + 1`; middle operands are stashed in a temp so
++	 * they are evaluated once and reused as the next clause's left operand. */
++	for (i = n; i-- > 0; ) {
++		uint32_t pos = n - 1 - i;
++		zend_ast *cmp = links[i];
++		zend_ast *lhs = (pos == 0) ? cmp->child[0] : zend_chain_temp_var(pos);
++		zend_ast *rhs = (i == 0)
++			? cmp->child[1]
++			: zend_ast_create(ZEND_AST_ASSIGN, zend_chain_temp_var(pos + 1), cmp->child[1]);
++		zend_ast *link = zend_make_relational(cmp, lhs, rhs);
++
++		chain = chain ? zend_ast_create(ZEND_AST_AND, chain, link) : link;
++	}
++
++	return chain;
++}
++
+ static void zend_compile_binary_op(znode *result, zend_ast *ast) /* {{{ */
+ {
+ 	zend_ast *left_ast = ast->child[0];
+@@ -11842,12 +11921,26 @@ static void zend_compile_expr_inner(znode *result, zend_ast *ast) /* {{{ */
+ 			zend_compile_compound_assign(result, ast);
+ 			return;
+ 		case ZEND_AST_BINARY_OP:
++		{
++			zend_ast *chain = zend_desugar_comparison_chain(ast);
++			if (chain) {
++				zend_compile_expr(result, chain);
++				return;
++			}
+ 			zend_compile_binary_op(result, ast);
+ 			return;
++		}
+ 		case ZEND_AST_GREATER:
+ 		case ZEND_AST_GREATER_EQUAL:
++		{
++			zend_ast *chain = zend_desugar_comparison_chain(ast);
++			if (chain) {
++				zend_compile_expr(result, chain);
++				return;
++			}
+ 			zend_compile_greater(result, ast);
+ 			return;
++		}
+ 		case ZEND_AST_UNARY_OP:
+ 			zend_compile_unary_op(result, ast);
+ 			return;
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..2bcc7d4a 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -70,7 +70,10 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %left '^'
+ %left T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG
+ %nonassoc T_IS_EQUAL T_IS_NOT_EQUAL T_IS_IDENTICAL T_IS_NOT_IDENTICAL T_SPACESHIP
+-%nonassoc '<' T_IS_SMALLER_OR_EQUAL '>' T_IS_GREATER_OR_EQUAL
++/* Relational operators are left-associative (was nonassoc) so that a run like
++ * `a < b < c` parses instead of being a syntax error; the compiler then lowers
++ * it to Python-style chained-comparison semantics. */
++%left '<' T_IS_SMALLER_OR_EQUAL '>' T_IS_GREATER_OR_EQUAL
+ %left T_PIPE
+ %left '.'
+ %left T_SL T_SR

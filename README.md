@@ -30,6 +30,7 @@ Raku, D, and Nim:
 | 12 | `recur` + automatic self-TCO — constant-stack tail recursion | Clojure/Scheme | [12-recur](features/12-recur/) |
 | 13 | Placeholder lambdas — `_` implicit params | Scala/Raku | [13-placeholder](features/13-placeholder/) |
 | 14 | Uniform Function Call Syntax — `$obj->freeFn()` | D/Nim | [14-ufcs](features/14-ufcs/) |
+| 15 | Chained comparisons — `a < b < c` | Python | [15-chained-comparisons](features/15-chained-comparisons/) |
 
 Each folder holds `feature.patch`, a `README.md` writeup, an `RFC.md` proposal, a
 `tests/` suite, and `smoke.sh`.
