@@ -262,4 +262,19 @@ function ifThenElse(bool $c, lazy $then, lazy $else) { return $c ? $then : $else
 function fact(int $n): int { return ifThenElse($n <= 1, 1, $n * fact($n - 1)); }
 echo fact(10), "\\n";           // eager evaluation would recurse forever
 `,
+  '19-infix': `<?php
+// Any two-argument function can be written between its operands.
+echo 3 max 7, "\\n";                       // max(3, 7)
+echo 2 pow 10, "\\n";                      // pow(2, 10)
+var_dump("hello" str_contains "ell");
+
+// User functions too — left-associative, binds tighter than arithmetic.
+function add(int $a, int $b): int { return $a + $b; }
+echo 1 add 2 add 3, "\\n";                 // add(add(1,2),3)
+
+function clamp(int $x, array $range): int {
+    return max($range[0], min($range[1], $x));
+}
+echo 150 clamp [0, 100], "\\n";            // 100
+`,
 };
