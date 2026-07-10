@@ -1,0 +1,226 @@
+diff --git a/Zend/tests/ufcs.phpt b/Zend/tests/ufcs.phpt
+new file mode 100644
+index 00000000..929de716
+--- /dev/null
++++ b/Zend/tests/ufcs.phpt
+@@ -0,0 +1,54 @@
++--TEST--
++UFCS: a free function called in method position, receiver passed first
++--FILE--
++<?php
++final class Vec {
++    public function __construct(public int $x, public int $y) {}
++}
++
++// `->len()` -> len($v); `->add($o)` -> add($v, $o).
++function len(Vec $v): float { return sqrt($v->x ** 2 + $v->y ** 2); }
++function add(Vec $a, Vec $b): Vec { return new Vec($a->x + $b->x, $a->y + $b->y); }
++function scale(Vec $v, int $k): Vec { return new Vec($v->x * $k, $v->y * $k); }
++
++$v = new Vec(3, 4);
++echo $v->len(), "\n";                       // 5
++
++// Extra arguments follow the receiver.
++$s = $v->scale(2);
++echo "{$s->x},{$s->y}\n";                    // 6,8
++
++// Chaining: each free function returns a Vec.
++$r = $v->add(new Vec(1, 1))->scale(10);
++echo "{$r->x},{$r->y}\n";                    // 40,50
++
++// A real method always wins over a same-named free function.
++function label(Vec $v): string { return "free"; }
++class Named {
++    public function __construct(public int $x, public int $y) {}
++    public function label(): string { return "method"; }
++}
++echo (new Named(0, 0))->label(), "\n";       // method
++
++// __call still takes precedence over UFCS.
++function ping($o): string { return "free"; }
++class WithCall {
++    public function __call($name, $args): string { return "__call:$name"; }
++}
++echo (new WithCall)->ping(), "\n";           // __call:ping
++
++// No method and no matching free function -> the usual error.
++class Bare {}
++try {
++    (new Bare)->missing();
++} catch (\Error $e) {
++    echo $e->getMessage(), "\n";
++}
++?>
++--EXPECT--
++5
++6,8
++40,50
++method
++__call:ping
++Call to undefined method Bare::missing()
+diff --git a/Zend/tests/ufcs_comprehensive.phpt b/Zend/tests/ufcs_comprehensive.phpt
+new file mode 100644
+index 00000000..e725ecd8
+--- /dev/null
++++ b/Zend/tests/ufcs_comprehensive.phpt
+@@ -0,0 +1,50 @@
++--TEST--
++UFCS: chaining, reentrancy, spread, global resolution, inheritance, exceptions
++--FILE--
++<?php
++namespace {
++    final class Box { public function __construct(public int $v) {} }
++
++    function inc(Box $b): Box { return new Box($b->v + 1); }
++    function dbl(Box $b): Box { return new Box($b->v * 2); }
++
++    // Chaining across free functions.
++    echo (new Box(3))->inc()->dbl()->inc()->v, "\n";   // ((3+1)*2)+1 = 9
++
++    // A free function whose body itself uses UFCS (trampoline reentrancy).
++    function outer(Box $b): int { return $b->twice() + 1; }
++    function twice(Box $b): int { return $b->v * 2; }
++    echo (new Box(5))->outer(), "\n";                   // 11
++
++    // Spread arguments follow the receiver.
++    function total(Box $b, int ...$xs): int { return $b->v + array_sum($xs); }
++    $args = [1, 2, 3];
++    echo (new Box(10))->total(...$args), "\n";          // 16
++
++    // Inherited methods still win over UFCS.
++    function kind($o): string { return "free"; }
++    class Base { public function kind(): string { return "base"; } }
++    class Derived extends Base {}
++    echo (new Derived)->kind(), "\n";                    // base
++
++    // Exceptions from the free function propagate normally.
++    function boom(Box $b): void { throw new \RuntimeException("bang"); }
++    try {
++        (new Box(0))->boom();
++    } catch (\Throwable $e) {
++        echo "caught: ", $e->getMessage(), "\n";
++    }
++}
++
++namespace App {
++    // A global-namespace function resolves even from a namespaced call site.
++    echo (new \Box(7))->dbl()->v, "\n";                  // 14
++}
++?>
++--EXPECT--
++9
++11
++16
++base
++caught: bang
++14
+diff --git a/Zend/zend_object_handlers.c b/Zend/zend_object_handlers.c
+index 67257913..0edc2baa 100644
+--- a/Zend/zend_object_handlers.c
++++ b/Zend/zend_object_handlers.c
+@@ -1832,6 +1832,77 @@ static zend_always_inline zend_function *zend_get_user_call_function(zend_class_
+ }
+ /* }}} */
+ 
++/* --- Uniform Function Call Syntax (UFCS) -----------------------------------
++ * Borrowed from D and Nim. When `$obj->foo(...)` names no method on the object's
++ * class (and there is no __call), and a *free function* `foo` exists, the call is
++ * rewritten to `foo($obj, ...)` — the receiver becomes the first argument. This
++ * lets any plain function read as a method and makes fluent pipelines out of the
++ * standard library:  $text->trim()->explode(",").
++ *
++ * Implemented as an internal-function trampoline (modelled on the property-hook
++ * trampolines above): no new opcode, no scanner/parser/VM changes. The trampoline
++ * only ever materialises on the "method not found" slow path, so ordinary method
++ * calls pay nothing. */
++
++static ZEND_FUNCTION(zend_ufcs_trampoline)
++{
++	zend_function *target = (zend_function *) EX(func)->internal_function.reserved[0];
++	zend_object *obj = Z_OBJ_P(ZEND_THIS);
++	uint32_t argc = ZEND_NUM_ARGS();
++	zval *args = argc ? ZEND_CALL_ARG(execute_data, 1) : NULL;
++	zval *params;
++	uint32_t i;
++	ALLOCA_FLAG(use_heap)
++
++	/* Build [ $obj, arg1, ..., argN ] and call the free function positionally. */
++	params = do_alloca((argc + 1) * sizeof(zval), use_heap);
++	ZVAL_OBJ(&params[0], obj);
++	for (i = 0; i < argc; i++) {
++		ZVAL_COPY_VALUE(&params[i + 1], &args[i]);
++	}
++
++	zend_call_known_function(target, NULL, NULL, return_value, argc + 1, params, NULL);
++
++	free_alloca(params, use_heap);
++
++	/* This trampoline owns itself; release it (see zend_parent_hook_*_trampoline). */
++	zend_string_release(EX(func)->common.function_name);
++	zend_free_trampoline(EX(func));
++	EX(func) = NULL;
++}
++
++static zend_function *zend_ufcs_get_trampoline(zend_class_entry *ce, zend_string *method_name, zend_function *target) /* {{{ */
++{
++	static const zend_internal_arg_info arg_info[1] = {{0}};
++	zend_function *func;
++
++	if (EXPECTED(EG(trampoline).common.function_name == NULL)) {
++		func = &EG(trampoline);
++	} else {
++		func = (zend_function *)(uintptr_t)ecalloc(1, sizeof(zend_internal_function));
++	}
++	func->type = ZEND_INTERNAL_FUNCTION;
++	func->common.T = 0;
++	func->common.arg_flags[0] = 0;
++	func->common.arg_flags[1] = 0;
++	func->common.arg_flags[2] = 0;
++	func->common.fn_flags = ZEND_ACC_CALL_VIA_TRAMPOLINE | ZEND_ACC_PUBLIC | ZEND_ACC_VARIADIC;
++	func->common.function_name = zend_string_copy(method_name);
++	func->common.num_args = 0;
++	func->common.required_num_args = 0;
++	func->common.scope = ce;
++	func->common.prototype = NULL;
++	func->common.prop_info = NULL;
++	func->common.arg_info = (zend_arg_info *) arg_info;
++	func->internal_function.handler = ZEND_FN(zend_ufcs_trampoline);
++	func->internal_function.module = NULL;
++	func->internal_function.reserved[0] = target;
++	func->internal_function.reserved[1] = NULL;
++
++	return func;
++}
++/* }}} */
++
+ ZEND_API ZEND_COLD zend_never_inline void zend_bad_method_call(const zend_function *fbc, const zend_string *method_name, const zend_class_entry *scope) /* {{{ */
+ {
+ 	zend_throw_error(NULL, "Call to %s method %s::%s() from %s%s",
+@@ -1869,14 +1940,23 @@ ZEND_API zend_function *zend_std_get_method(zend_object **obj_ptr, zend_string *
+ 	}
+ 
+ 	if (UNEXPECTED((func = zend_hash_find(&zobj->ce->function_table, lc_method_name)) == NULL)) {
++		if (zobj->ce->__call) {
++			if (UNEXPECTED(!key)) {
++				ZSTR_ALLOCA_FREE(lc_method_name, use_heap);
++			}
++			return zend_get_user_call_function(zobj->ce, method_name);
++		}
++		/* UFCS: no such method and no __call — fall back to a free function
++		 * `method_name($this, ...)` if one exists. Function names are stored
++		 * lowercased, so reuse lc_method_name before it is freed. */
++		zval *ufcs_func = zend_hash_find(EG(function_table), lc_method_name);
+ 		if (UNEXPECTED(!key)) {
+ 			ZSTR_ALLOCA_FREE(lc_method_name, use_heap);
+ 		}
+-		if (zobj->ce->__call) {
+-			return zend_get_user_call_function(zobj->ce, method_name);
+-		} else {
+-			return NULL;
++		if (ufcs_func) {
++			return zend_ufcs_get_trampoline(zobj->ce, method_name, Z_FUNC_P(ufcs_func));
+ 		}
++		return NULL;
+ 	}
+ 
+ 	fbc = Z_FUNC_P(func);

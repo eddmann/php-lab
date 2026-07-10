@@ -169,4 +169,26 @@ print_r(array_map(_ + 1, array_map(_ * 10, [1, 2, 3])));
 $k = 100;
 print_r(array_map(_ + $k, [1, 2]));
 `,
+  '14-ufcs': `<?php
+final class Vec {
+    public function __construct(public int $x, public int $y) {}
+}
+// Free functions — no methods on Vec.
+function len(Vec $v): float       { return sqrt($v->x ** 2 + $v->y ** 2); }
+function scale(Vec $v, int $k): Vec { return new Vec($v->x * $k, $v->y * $k); }
+function add(Vec $a, Vec $b): Vec { return new Vec($a->x + $b->x, $a->y + $b->y); }
+
+$v = new Vec(3, 4);
+echo $v->len(), "\\n";                         // len($v) == 5
+
+$r = $v->add(new Vec(1, 1))->scale(10);        // chains through free functions
+echo "{$r->x},{$r->y}\\n";                     // 40,50
+
+// A real method always wins; __call still takes precedence over UFCS.
+class Named {
+    public function __construct(public int $x, public int $y) {}
+    public function len(): string { return "method"; }
+}
+echo (new Named(3, 4))->len(), "\\n";          // method
+`,
 };
