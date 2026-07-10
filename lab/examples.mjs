@@ -228,4 +228,22 @@ class Box {
 $xs = [new Box(1), new Box(2), new Box(3)];
 print_r($xs*->inc()*->get());  // [2, 3, 4]
 `,
+  '17-trailing-closures': `<?php
+// A block after a call becomes its final closure argument.
+$xs = [3, 1, 2];
+usort($xs) { |$a, $b| return $a <=> $b; };
+print_r($xs);
+
+// Auto-captures surrounding variables (by value).
+function run(callable $f) { return $f(); }
+$greeting = "hello";
+echo run() { return strtoupper($greeting); }, "\\n";
+
+// Works on method and static calls too.
+function each_of(array $xs, callable $f): void { foreach ($xs as $x) $f($x); }
+each_of([1, 2, 3]) { |$x|
+    $sq = $x * $x;
+    echo "$x^2 = $sq\\n";
+};
+`,
 };

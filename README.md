@@ -12,7 +12,7 @@ tests on its own.
 ## Features
 
 Ideas borrowed from Rust, Scala, Go, Ruby, Kotlin, Clojure, Scheme, JS, C#, Python,
-Raku, D, Nim, and Groovy:
+Raku, D, Nim, Groovy, and Swift:
 
 | # | Feature | From | Folder |
 |---|---------|------|--------|
@@ -32,6 +32,7 @@ Raku, D, Nim, and Groovy:
 | 14 | Uniform Function Call Syntax — `$obj->freeFn()` | D/Nim | [14-ufcs](features/14-ufcs/) |
 | 15 | Chained comparisons — `a < b < c` | Python | [15-chained-comparisons](features/15-chained-comparisons/) |
 | 16 | Spread-dot — `$coll*->method()` | Groovy | [16-spread-dot](features/16-spread-dot/) |
+| 17 | Trailing closures — `usort($xs) { \|$a, $b\| … }` | Swift/Ruby | [17-trailing-closures](features/17-trailing-closures/) |
 
 Each folder holds `feature.patch`, a `README.md` writeup, an `RFC.md` proposal, a
 `tests/` suite, and `smoke.sh`.
