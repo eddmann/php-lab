@@ -1,0 +1,695 @@
+diff --git a/Zend/tests/lazy_params.phpt b/Zend/tests/lazy_params.phpt
+new file mode 100644
+index 00000000..25b49808
+--- /dev/null
++++ b/Zend/tests/lazy_params.phpt
+@@ -0,0 +1,63 @@
++--TEST--
++lazy params: by-name arguments — deferred, memoized, short-circuiting
++--FILE--
++<?php
++// An unused lazy argument is never evaluated.
++function boom(): string { echo "BOOM "; return "x"; }
++function debug_log(bool $on, lazy $msg): void { if ($on) echo $msg, "\n"; }
++debug_log(false, boom());
++echo "quiet\n";
++debug_log(true, boom());
++
++// Forced exactly once, memoized across reads.
++function once(): int { echo "eval "; return 42; }
++function triple(lazy $x): int { return $x + $x + $x; }
++echo triple(once()), "\n";
++
++// The body starts before the arguments evaluate; forcing order is use order.
++function t(string $tag): string { echo $tag; return $tag; }
++function g(lazy $a, lazy $b): string { echo "-body-"; return $b . $a; }
++echo ":", g(t("A"), t("B")), "\n";
++
++// The expression is captured (by value) at the call site.
++function id(lazy $x) { return $x; }
++$n = 1;
++$r = id($n + 10);
++$n = 99;
++echo $r, "\n";
++
++// A throwing argument only throws when forced — and in the callee's frame.
++function risky(): int { throw new RuntimeException("late"); }
++function guard(bool $use, lazy $v): string {
++    if (!$use) return "skipped";
++    try { return "got:" . $v; } catch (Throwable $e) { return "caught:" . $e->getMessage(); }
++}
++echo guard(false, risky()), "\n";
++echo guard(true, risky()), "\n";
++
++// The assert idiom: diagnostics cost nothing on the happy path.
++function assert_that(bool $cond, lazy $msg): string {
++    if (!$cond) throw new AssertionError($msg);
++    return "ok";
++}
++function expensive(): string { echo "EXPENSIVE "; return "diag"; }
++echo assert_that(true, expensive()), "\n";
++try { assert_that(false, expensive()); } catch (AssertionError $e) { echo "caught:", $e->getMessage(), "\n"; }
++
++// User-defined control flow: the untaken branch never evaluates,
++// so recursion through a lazy argument terminates.
++function ifThenElse(bool $c, lazy $then, lazy $else) { return $c ? $then : $else; }
++function fact(int $n): int { return ifThenElse($n <= 1, 1, $n * fact($n - 1)); }
++echo fact(10), "\n";
++?>
++--EXPECT--
++quiet
++BOOM x
++eval 126
++:-body-BABA
++11
++skipped
++caught:late
++ok
++EXPENSIVE caught:diag
++3628800
+diff --git a/Zend/tests/lazy_params_comprehensive.phpt b/Zend/tests/lazy_params_comprehensive.phpt
+new file mode 100644
+index 00000000..9a4333f6
+--- /dev/null
++++ b/Zend/tests/lazy_params_comprehensive.phpt
+@@ -0,0 +1,28 @@
++--TEST--
++lazy params: closures, degradation, read-only, validations, methods
++--FILE--
++<?php
++// A closure in the body captures the thunk; memoization is shared.
++function count_evals(): int { static $n = 0; $n++; echo "eval#$n "; return 7; }
++function h(lazy $x): int { $g = fn() => $x + 1; return $g() + $x; }
++echo h(count_evals()), "\n";                    // eval#1 once, 8 + 7 = 15
++
++// Dynamic and indirect calls degrade to eager evaluation but stay correct.
++function shout(lazy $s): string { return strtoupper($s); }
++$fn = "shout";
++echo $fn("dynamic"), "\n";
++echo call_user_func("shout", "cuf"), "\n";
++
++// A lazy parameter is read-only.
++try {
++    eval('function w(lazy $x) { $x = 5; }');
++} catch (\Throwable $e) {
++    echo "unreachable\n";
++}
++?>
++--EXPECTF--
++eval#1 15
++DYNAMIC
++CUF
++
++Fatal error: Cannot modify lazy parameter $x in %s on line %d
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..e3eca38f 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -3711,6 +3711,190 @@ static uint32_t zend_get_arg_num(zend_function *fn, zend_string *arg_name) {
+ 	return (uint32_t) -1;
+ }
+ 
++/* --- By-name (lazy) parameters (ALGOL 60 / Scala) ---------------------------
++ * `function f(lazy $x)` defers evaluation of the matching argument: call sites
++ * that resolve the callee at compile time wrap the argument in a LazyThunk
++ * (`new \\LazyThunk(fn() => ARG)`), and every read of the parameter inside the
++ * body is compiled as `\\__lazy_force($x)`, which forces the thunk exactly once
++ * (memoized) and passes plain values straight through. When the callee is not
++ * statically known the argument evaluates eagerly and the force is a no-op, so
++ * semantics degrade gracefully to call-by-value. */
++
++static bool zend_lazy_ast_contains_yield(zend_ast *ast)
++{
++	if (ast == NULL || zend_ast_is_special(ast)) {
++		return 0; /* a yield inside a nested declaration belongs to it */
++	}
++	if (ast->kind == ZEND_AST_YIELD || ast->kind == ZEND_AST_YIELD_FROM) {
++		return 1;
++	}
++	if (zend_ast_is_list(ast)) {
++		zend_ast_list *list = zend_ast_get_list(ast);
++		for (uint32_t i = 0; i < list->children; i++) {
++			if (zend_lazy_ast_contains_yield(list->child[i])) return 1;
++		}
++	} else {
++		uint32_t n = zend_ast_get_num_children(ast);
++		for (uint32_t i = 0; i < n; i++) {
++			if (zend_lazy_ast_contains_yield(ast->child[i])) return 1;
++		}
++	}
++	return 0;
++}
++
++static bool zend_lazy_is_lazy_var(zend_ast *ast, HashTable *names)
++{
++	return ast && ast->kind == ZEND_AST_VAR
++		&& ast->child[0]->kind == ZEND_AST_ZVAL
++		&& Z_TYPE_P(zend_ast_get_zval(ast->child[0])) == IS_STRING
++		&& zend_hash_exists(names, zend_ast_get_str(ast->child[0]));
++}
++
++static zend_ast *zend_lazy_force_call(zend_ast *var_ast)
++{
++	zend_ast *name = zend_ast_create_zval_from_str(
++		zend_string_init("__lazy_force", sizeof("__lazy_force") - 1, 0));
++	name->attr = ZEND_NAME_FQ;
++	return zend_ast_create(ZEND_AST_CALL, name,
++		zend_ast_create_list(1, ZEND_AST_ARG_LIST, var_ast));
++}
++
++static bool zend_lazy_params_shadow(zend_ast *params_ast, HashTable *names)
++{
++	if (!params_ast) return 0;
++	zend_ast_list *list = zend_ast_get_list(params_ast);
++	for (uint32_t i = 0; i < list->children; i++) {
++		zend_ast *p = list->child[i];
++		if (p && zend_hash_exists(names, zend_ast_get_str(p->child[1]))) return 1;
++	}
++	return 0;
++}
++
++/* Rewrite value-position reads of lazy parameters into __lazy_force() calls.
++ * Direct writes to a lazy parameter are compile errors (they are read-only);
++ * isset()/empty() observe the raw slot and are left untouched. */
++static void zend_lazy_rewrite_reads(zend_ast **astp, HashTable *names)
++{
++	zend_ast *ast = *astp;
++	if (ast == NULL) {
++		return;
++	}
++
++	if (zend_lazy_is_lazy_var(ast, names)) {
++		*astp = zend_lazy_force_call(ast);
++		return;
++	}
++
++	if (zend_ast_is_decl(ast)) {
++		/* Descend into closures/arrow functions (they capture the thunk and
++		 * force it on read); skip other declarations, whose locals are fresh. */
++		zend_ast_decl *decl = (zend_ast_decl *) ast;
++		if ((ast->kind == ZEND_AST_CLOSURE || ast->kind == ZEND_AST_ARROW_FUNC)
++				&& !zend_lazy_params_shadow(decl->child[0], names)) {
++			zend_lazy_rewrite_reads(&decl->child[2], names);
++		}
++		return;
++	}
++	if (zend_ast_is_special(ast)) {
++		return;
++	}
++
++	switch (ast->kind) {
++		case ZEND_AST_ASSIGN:
++		case ZEND_AST_ASSIGN_REF:
++		case ZEND_AST_ASSIGN_OP:
++		case ZEND_AST_ASSIGN_COALESCE:
++		case ZEND_AST_PRE_INC:
++		case ZEND_AST_PRE_DEC:
++		case ZEND_AST_POST_INC:
++		case ZEND_AST_POST_DEC:
++		case ZEND_AST_UNSET: {
++			zend_ast *base = ast->child[0];
++			while (base && (base->kind == ZEND_AST_DIM
++					|| base->kind == ZEND_AST_PROP || base->kind == ZEND_AST_NULLSAFE_PROP)) {
++				base = base->child[0];
++			}
++			if (zend_lazy_is_lazy_var(base, names)) {
++				zend_error_noreturn(E_COMPILE_ERROR, "Cannot modify lazy parameter $%s",
++					ZSTR_VAL(zend_ast_get_str(base->child[0])));
++			}
++			break; /* generic recursion below rewrites reads in target + value */
++		}
++		case ZEND_AST_ISSET:
++		case ZEND_AST_EMPTY:
++			if (zend_lazy_is_lazy_var(ast->child[0], names)) {
++				return; /* observe the raw slot */
++			}
++			break;
++		case ZEND_AST_STATIC:
++		case ZEND_AST_GLOBAL:
++			return;
++		default:
++			break;
++	}
++
++	if (zend_ast_is_list(ast)) {
++		zend_ast_list *list = zend_ast_get_list(ast);
++		for (uint32_t i = 0; i < list->children; i++) {
++			zend_lazy_rewrite_reads(&list->child[i], names);
++		}
++	} else {
++		uint32_t n = zend_ast_get_num_children(ast);
++		for (uint32_t i = 0; i < n; i++) {
++			zend_lazy_rewrite_reads(&ast->child[i], names);
++		}
++	}
++}
++
++static void zend_lazy_rewrite_body(zend_ast_decl *decl)
++{
++	HashTable names;
++	zend_ast_list *params = zend_ast_get_list(decl->child[0]);
++	bool any = 0;
++
++	zend_hash_init(&names, 8, NULL, NULL, 0);
++	for (uint32_t i = 0; i < params->children; i++) {
++		zend_ast *p = params->child[i];
++		if (p && (p->attr & ZEND_PARAM_LAZY)) {
++			zend_hash_add_empty_element(&names, zend_ast_get_str(p->child[1]));
++			any = 1;
++		}
++	}
++	if (any && decl->child[2]) {
++		zend_lazy_rewrite_reads(&decl->child[2], &names);
++	}
++	zend_hash_destroy(&names);
++}
++
++/* Call-site half: when the callee is known and parameter i is lazy, wrap the
++ * matching plain positional argument in `new \\LazyThunk(fn() => ARG)`. */
++static void zend_lazy_thunk_args(zend_ast_list *args, zend_function *fbc)
++{
++	if (!fbc || fbc->type != ZEND_USER_FUNCTION || !fbc->op_array.lazy_params) {
++		return;
++	}
++	for (uint32_t i = 0; i < args->children && i < 32; i++) {
++		zend_ast *arg = args->child[i];
++		if (!arg || !(fbc->op_array.lazy_params & (1u << i))) {
++			continue;
++		}
++		if (arg->kind == ZEND_AST_UNPACK || arg->kind == ZEND_AST_NAMED_ARG) {
++			continue; /* v1: only plain positional arguments are thunked */
++		}
++		if (zend_lazy_ast_contains_yield(arg)) {
++			continue; /* moving a yield into the thunk would change generators */
++		}
++		zend_ast *thunk = zend_ast_create_decl(ZEND_AST_ARROW_FUNC, 0,
++			zend_ast_get_lineno(arg), NULL, NULL,
++			zend_ast_create_list(0, ZEND_AST_PARAM_LIST), NULL, arg, NULL, NULL);
++		zend_ast *cls = zend_ast_create_zval_from_str(
++			zend_string_init("LazyThunk", sizeof("LazyThunk") - 1, 0));
++		cls->attr = ZEND_NAME_FQ;
++		args->child[i] = zend_ast_create(ZEND_AST_NEW, cls,
++			zend_ast_create_list(1, ZEND_AST_ARG_LIST, thunk));
++	}
++}
++
+ static uint32_t zend_compile_args(
+ 		zend_ast *ast, zend_function *fbc, bool *may_have_extra_named_args) /* {{{ */
+ {
+@@ -3719,6 +3903,8 @@ static uint32_t zend_compile_args(
+ 	bool uses_arg_unpack = 0;
+ 	uint32_t arg_count = 0; /* number of arguments not including unpacks */
+ 
++	zend_lazy_thunk_args(args, fbc);
++
+ 	/* Whether named arguments are used syntactically, to enforce language level limitations.
+ 	 * May not actually use named argument passing. */
+ 	bool uses_named_args = 0;
+@@ -7784,9 +7970,38 @@ static void zend_compile_params(zend_ast *ast, zend_ast *return_type_ast, uint32
+ 		bool is_variadic = (param_ast->attr & ZEND_PARAM_VARIADIC) != 0;
+ 		uint32_t property_flags = param_ast->attr & promotion_flags;
+ 		bool is_promoted = property_flags || hooks_ast;
++		bool is_lazy = (param_ast->attr & ZEND_PARAM_LAZY) != 0;
+ 
+ 		CG(zend_lineno) = param_ast->lineno;
+ 
++		if (is_lazy) {
++			if (type_ast) {
++				zend_error_noreturn(E_COMPILE_ERROR,
++					"Lazy parameter $%s cannot declare a type", ZSTR_VAL(zend_ast_get_str(var_ast)));
++			}
++			if (param_ast->attr & ZEND_PARAM_REF) {
++				zend_error_noreturn(E_COMPILE_ERROR,
++					"Lazy parameter $%s cannot be passed by reference", ZSTR_VAL(zend_ast_get_str(var_ast)));
++			}
++			if (param_ast->attr & ZEND_PARAM_VARIADIC) {
++				zend_error_noreturn(E_COMPILE_ERROR,
++					"Lazy parameter $%s cannot be variadic", ZSTR_VAL(zend_ast_get_str(var_ast)));
++			}
++			if (*default_ast_ptr) {
++				zend_error_noreturn(E_COMPILE_ERROR,
++					"Lazy parameter $%s cannot have a default value", ZSTR_VAL(zend_ast_get_str(var_ast)));
++			}
++			if (is_promoted) {
++				zend_error_noreturn(E_COMPILE_ERROR,
++					"Lazy parameter $%s cannot be promoted", ZSTR_VAL(zend_ast_get_str(var_ast)));
++			}
++			if (i >= 32) {
++				zend_error_noreturn(E_COMPILE_ERROR,
++					"Only the first 32 parameters may be lazy");
++			}
++			op_array->lazy_params |= (1u << i);
++		}
++
+ 		znode var_node, default_node;
+ 		uint8_t opcode;
+ 		zend_op *opline;
+@@ -8594,6 +8809,12 @@ static zend_op_array *zend_compile_func_decl_ex(
+ 		}
+ 	}
+ 
++	/* Lazy params: compile reads of lazy parameters as __lazy_force() calls. */
++	if (CG(active_op_array)->lazy_params) {
++		zend_lazy_rewrite_body(decl);
++		stmt_ast = decl->child[2];
++	}
++
+ 	zend_compile_stmt(stmt_ast);
+ 
+ 	if (is_method) {
+diff --git a/Zend/zend_compile.h b/Zend/zend_compile.h
+index c07fa9bf..528d05e7 100644
+--- a/Zend/zend_compile.h
++++ b/Zend/zend_compile.h
+@@ -550,6 +550,10 @@ struct _zend_op_array {
+ 	uint32_t line_start;
+ 	uint32_t line_end;
+ 
++	/* Bitmask of by-name (lazy) parameters, bit i => param i. Lets call sites
++	 * that resolve this function at compile time thunk the matching argument. */
++	uint32_t lazy_params;
++
+ 	int last_literal;
+ 	uint32_t num_dynamic_func_defs;
+ 	zval *literals;
+@@ -1041,6 +1045,10 @@ ZEND_API zend_string *zend_type_to_string(zend_type type);
+ /* These should not clash with ZEND_ACC_PPP_MASK and ZEND_ACC_PPP_SET_MASK */
+ #define ZEND_PARAM_REF      (1<<3)
+ #define ZEND_PARAM_VARIADIC (1<<4)
++/* By-name (lazy) parameter — see zend_lazy.c. The param attr field is a
++ * 16-bit zend_ast_attr; bit 14 stays clear of the visibility, set-visibility,
++ * readonly/final and ref/variadic bits that share it. */
++#define ZEND_PARAM_LAZY     (1<<14)
+ 
+ #define ZEND_NAME_FQ       0
+ #define ZEND_NAME_NOT_FQ   1
+diff --git a/Zend/zend_default_classes.c b/Zend/zend_default_classes.c
+index 7ab9b832..ac044855 100644
+--- a/Zend/zend_default_classes.c
++++ b/Zend/zend_default_classes.c
+@@ -28,6 +28,7 @@
+ #include "zend_weakrefs.h"
+ #include "zend_enum.h"
+ #include "zend_fibers.h"
++#include "zend_lazy.h"
+ 
+ ZEND_API void zend_register_default_classes(void)
+ {
+@@ -40,4 +41,5 @@ ZEND_API void zend_register_default_classes(void)
+ 	zend_register_attribute_ce();
+ 	zend_register_enum_ce();
+ 	zend_register_fiber_ce();
++	zend_register_lazy();
+ }
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..f66abbe2 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -116,6 +116,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token <ident> T_CLONE         "'clone'"
+ %token <ident> T_EXIT          "'exit'"
+ %token <ident> T_IF            "'if'"
++%token <ident> T_LAZY          "'lazy'"
+ %token <ident> T_ELSEIF        "'elseif'"
+ %token <ident> T_ELSE          "'else'"
+ %token <ident> T_ENDIF         "'endif'"
+@@ -291,6 +292,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ 
+ %type <num> returns_ref function fn is_reference is_variadic property_modifiers property_hook_modifiers
+ %type <num> method_modifiers class_const_modifiers member_modifier optional_cpp_modifiers
++%type <num> optional_lazy
+ %type <num> class_modifiers class_modifier anonymous_class_modifiers anonymous_class_modifiers_optional use_type backup_fn_flags
+ 
+ %type <ptr> backup_lex_pos
+@@ -306,7 +308,7 @@ start:
+ 
+ reserved_non_modifiers:
+ 	  T_INCLUDE | T_INCLUDE_ONCE | T_EVAL | T_REQUIRE | T_REQUIRE_ONCE | T_LOGICAL_OR | T_LOGICAL_XOR | T_LOGICAL_AND
+-	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
++	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_LAZY | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
+ 	| T_FOR | T_ENDFOR | T_FOREACH | T_ENDFOREACH | T_DECLARE | T_ENDDECLARE | T_AS | T_TRY | T_CATCH | T_FINALLY
+ 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
+ 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
+@@ -816,14 +818,20 @@ optional_cpp_modifiers:
+ ;
+ 
+ parameter:
+-		optional_cpp_modifiers optional_type_without_static
++		optional_cpp_modifiers optional_lazy optional_type_without_static
+ 		is_reference is_variadic T_VARIABLE backup_doc_comment optional_property_hook_list
+-			{ $$ = zend_ast_create_ex(ZEND_AST_PARAM, $1 | $3 | $4, $2, $5, NULL,
+-					NULL, $6 ? zend_ast_create_zval_from_str($6) : NULL, $7); }
+-	|	optional_cpp_modifiers optional_type_without_static
++			{ $$ = zend_ast_create_ex(ZEND_AST_PARAM, $1 | $2 | $4 | $5, $3, $6, NULL,
++					NULL, $7 ? zend_ast_create_zval_from_str($7) : NULL, $8); }
++	|	optional_cpp_modifiers optional_lazy optional_type_without_static
+ 		is_reference is_variadic T_VARIABLE backup_doc_comment '=' expr optional_property_hook_list
+-			{ $$ = zend_ast_create_ex(ZEND_AST_PARAM, $1 | $3 | $4, $2, $5, $8,
+-					NULL, $6 ? zend_ast_create_zval_from_str($6) : NULL, $9); }
++			{ $$ = zend_ast_create_ex(ZEND_AST_PARAM, $1 | $2 | $4 | $5, $3, $6, $9,
++					NULL, $7 ? zend_ast_create_zval_from_str($7) : NULL, $10); }
++;
++
++/* By-name (lazy) parameter marker: `function f(lazy $x)`. */
++optional_lazy:
++		%empty { $$ = 0; }
++	|	T_LAZY { $$ = ZEND_PARAM_LAZY; }
+ ;
+ 
+ optional_type_without_static:
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..f0efb842 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1454,6 +1454,10 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_IF);
+ }
+ 
++<ST_IN_SCRIPTING>"lazy" {
++	RETURN_TOKEN_WITH_IDENT(T_LAZY);
++}
++
+ <ST_IN_SCRIPTING>"elseif" {
+ 	RETURN_TOKEN_WITH_IDENT(T_ELSEIF);
+ }
+diff --git a/Zend/zend_lazy.c b/Zend/zend_lazy.c
+new file mode 100644
+index 00000000..c29a3a90
+--- /dev/null
++++ b/Zend/zend_lazy.c
+@@ -0,0 +1,89 @@
++#include "zend.h"
++#include "zend_API.h"
++#include "zend_closures.h"
++#include "zend_exceptions.h"
++#include "zend_lazy.h"
++#include "zend_lazy_arginfo.h"
++
++ZEND_API zend_class_entry *zend_ce_lazy_thunk;
++
++/* Property slots (declaration order in register_class_LazyThunk). */
++#define LAZY_PROP_FN(obj)    OBJ_PROP_NUM((obj), 0)
++#define LAZY_PROP_VALUE(obj) OBJ_PROP_NUM((obj), 1)
++
++ZEND_METHOD(LazyThunk, __construct)
++{
++	zval *fn;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_OBJECT_OF_CLASS(fn, zend_ce_closure)
++	ZEND_PARSE_PARAMETERS_END();
++
++	zval *slot = LAZY_PROP_FN(Z_OBJ_P(ZEND_THIS));
++	zval_ptr_dtor(slot);
++	ZVAL_COPY(slot, fn);
++}
++
++/* Shared force implementation: evaluate the closure once, memoize, return. */
++static void zend_lazy_do_force(zend_object *thunk, zval *return_value)
++{
++	zval *fn = LAZY_PROP_FN(thunk);
++	zval *value = LAZY_PROP_VALUE(thunk);
++
++	ZVAL_DEREF(fn);
++	if (Z_TYPE_P(fn) == IS_OBJECT) {
++		zend_fcall_info fci;
++		zend_fcall_info_cache fcc;
++		char *error = NULL;
++		zval ret;
++
++		ZVAL_UNDEF(&ret);
++		if (zend_fcall_info_init(fn, 0, &fci, &fcc, NULL, &error) == SUCCESS) {
++			fci.retval = &ret;
++			zend_call_function(&fci, &fcc);
++		} else if (error) {
++			efree(error);
++		}
++		if (EG(exception)) {
++			zval_ptr_dtor(&ret);
++			RETURN_THROWS();
++		}
++
++		zval_ptr_dtor(value);
++		ZVAL_COPY_VALUE(value, &ret);
++		if (Z_TYPE_P(value) == IS_UNDEF) {
++			ZVAL_NULL(value);
++		}
++		/* Drop the closure: marks the thunk as forced and frees captures. */
++		zval_ptr_dtor(fn);
++		ZVAL_NULL(fn);
++	}
++
++	RETURN_COPY(value);
++}
++
++ZEND_METHOD(LazyThunk, force)
++{
++	ZEND_PARSE_PARAMETERS_NONE();
++	zend_lazy_do_force(Z_OBJ_P(ZEND_THIS), return_value);
++}
++
++ZEND_FUNCTION(__lazy_force)
++{
++	zval *value;
++	ZEND_PARSE_PARAMETERS_START(1, 1)
++		Z_PARAM_ZVAL(value)
++	ZEND_PARSE_PARAMETERS_END();
++
++	ZVAL_DEREF(value);
++	if (Z_TYPE_P(value) == IS_OBJECT && Z_OBJCE_P(value) == zend_ce_lazy_thunk) {
++		zend_lazy_do_force(Z_OBJ_P(value), return_value);
++		return;
++	}
++	RETURN_COPY(value);
++}
++
++void zend_register_lazy(void)
++{
++	zend_ce_lazy_thunk = register_class_LazyThunk();
++	zend_register_functions(NULL, lazy_functions, NULL, MODULE_PERSISTENT);
++}
+diff --git a/Zend/zend_lazy.h b/Zend/zend_lazy.h
+new file mode 100644
+index 00000000..f66486fc
+--- /dev/null
++++ b/Zend/zend_lazy.h
+@@ -0,0 +1,22 @@
++/*
++   +----------------------------------------------------------------------+
++   | LazyThunk — runtime support for by-name (lazy) parameters.           |
++   |                                                                      |
++   | Call sites that statically resolve a callee with a `lazy` parameter  |
++   | wrap the argument in `new \LazyThunk(fn() => ARG)`; the compiler     |
++   | rewrites reads of the parameter into `\__lazy_force($p)`, which      |
++   | evaluates the thunk once (memoized) and passes plain values through. |
++   +----------------------------------------------------------------------+
++*/
++
++#ifndef ZEND_LAZY_H
++#define ZEND_LAZY_H
++
++#include "zend.h"
++
++BEGIN_EXTERN_C()
++extern ZEND_API zend_class_entry *zend_ce_lazy_thunk;
++void zend_register_lazy(void);
++END_EXTERN_C()
++
++#endif /* ZEND_LAZY_H */
+diff --git a/Zend/zend_lazy.stub.php b/Zend/zend_lazy.stub.php
+new file mode 100644
+index 00000000..f7b83289
+--- /dev/null
++++ b/Zend/zend_lazy.stub.php
+@@ -0,0 +1,21 @@
++<?php
++
++/** @generate-class-entries */
++
++/**
++ * A suspended argument for a by-name (lazy) parameter (internal). Created by
++ * the compiler as `new \LazyThunk(fn() => ARG)`; `__lazy_force()` evaluates
++ * the closure on first use and memoizes the result.
++ */
++final class LazyThunk
++{
++    private ?Closure $fn = null;
++    private mixed $value = null;
++
++    public function __construct(Closure $fn) {}
++
++    public function force(): mixed {}
++}
++
++/** Force a LazyThunk (memoized); any other value passes straight through. */
++function __lazy_force(mixed $value): mixed {}
+diff --git a/Zend/zend_lazy_arginfo.h b/Zend/zend_lazy_arginfo.h
+new file mode 100644
+index 00000000..6ff149c2
+--- /dev/null
++++ b/Zend/zend_lazy_arginfo.h
+@@ -0,0 +1,41 @@
++/* This is a generated file, edit the .stub.php file instead.
++ * Stub hash: hand-maintained for the php-lab lazy-params experiment */
++
++ZEND_BEGIN_ARG_INFO_EX(arginfo_class_LazyThunk___construct, 0, 0, 1)
++	ZEND_ARG_OBJ_INFO(0, fn, Closure, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_LazyThunk_force, 0, 0, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo___lazy_force, 0, 1, IS_MIXED, 0)
++	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
++ZEND_END_ARG_INFO()
++
++ZEND_METHOD(LazyThunk, __construct);
++ZEND_METHOD(LazyThunk, force);
++ZEND_FUNCTION(__lazy_force);
++
++static const zend_function_entry class_LazyThunk_methods[] = {
++	ZEND_ME(LazyThunk, __construct, arginfo_class_LazyThunk___construct, ZEND_ACC_PUBLIC)
++	ZEND_ME(LazyThunk, force, arginfo_class_LazyThunk_force, ZEND_ACC_PUBLIC)
++	ZEND_FE_END
++};
++
++static const zend_function_entry lazy_functions[] = {
++	ZEND_FE(__lazy_force, arginfo___lazy_force)
++	ZEND_FE_END
++};
++
++static zend_class_entry *register_class_LazyThunk(void)
++{
++	zend_class_entry ce, *class_entry;
++
++	INIT_CLASS_ENTRY(ce, "LazyThunk", class_LazyThunk_methods);
++	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
++
++	zend_declare_property_null(class_entry, "fn", sizeof("fn") - 1, ZEND_ACC_PRIVATE);
++	zend_declare_property_null(class_entry, "value", sizeof("value") - 1, ZEND_ACC_PRIVATE);
++
++	return class_entry;
++}
+diff --git a/Zend/zend_opcode.c b/Zend/zend_opcode.c
+index f3631104..11ddc107 100644
+--- a/Zend/zend_opcode.c
++++ b/Zend/zend_opcode.c
+@@ -84,6 +84,7 @@ void init_op_array(zend_op_array *op_array, uint8_t type, int initial_ops_size)
+ 	op_array->last_try_catch = 0;
+ 
+ 	op_array->fn_flags = 0;
++	op_array->lazy_params = 0;
+ 
+ 	op_array->last_literal = 0;
+ 	op_array->literals = NULL;
+diff --git a/configure.ac b/configure.ac
+index d71eb21b..9a5f353d 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1767,6 +1767,7 @@ PHP_ADD_SOURCES([Zend], m4_normalize([
+     zend_interfaces.c
+     zend_iterators.c
+     zend_language_parser.c
++    zend_lazy.c
+     zend_language_scanner.c
+     zend_lazy_objects.c
+     zend_list.c

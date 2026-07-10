@@ -246,4 +246,20 @@ each_of([1, 2, 3]) { |$x|
     echo "$x^2 = $sq\\n";
 };
 `,
+  '18-lazy-params': `<?php
+// A \`lazy\` parameter receives the UNEVALUATED argument expression:
+// it runs only if read — and then just once (memoized).
+function boom(): string { echo "BOOM! "; return "x"; }
+function debug_log(bool $on, lazy $msg): void { if ($on) echo $msg, "\\n"; }
+
+debug_log(false, boom());      // boom() never runs
+echo "quiet so far\\n";
+debug_log(true, boom());       // now it runs
+
+// User-defined control flow: the untaken branch never evaluates,
+// so recursion through an argument terminates.
+function ifThenElse(bool $c, lazy $then, lazy $else) { return $c ? $then : $else; }
+function fact(int $n): int { return ifThenElse($n <= 1, 1, $n * fact($n - 1)); }
+echo fact(10), "\\n";           // eager evaluation would recurse forever
+`,
 };
