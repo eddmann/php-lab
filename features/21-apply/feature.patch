@@ -1,0 +1,292 @@
+diff --git a/Zend/tests/apply.phpt b/Zend/tests/apply.phpt
+new file mode 100644
+index 00000000..2ff51b8b
+--- /dev/null
++++ b/Zend/tests/apply.phpt
+@@ -0,0 +1,49 @@
++--TEST--
++apply: run a block with $this bound to a receiver, returning the receiver
++--FILE--
++<?php
++class Box {
++    public int $x = 0;
++    public int $y = 0;
++    public array $tags = [];
++}
++
++// Binds $this to the receiver; the block mutates it; the expression IS the receiver.
++$b = apply (new Box()) {
++    $this->x = 3;
++    $this->y = 4;
++    $this->tags[] = "a";
++    $this->tags[] = "b";
++};
++printf("%d,%d,%s\n", $b->x, $b->y, implode("|", $b->tags));
++
++// Surrounding variables are captured by value (arrow-function semantics).
++$host = "db.local";
++$port = 5432;
++class Cfg { public string $dsn = ""; }
++$c = apply (new Cfg()) { $this->dsn = "$host:$port"; };
++echo $c->dsn, "\n";
++
++// Nested apply rebinds $this to each inner receiver.
++class Node { public string $name = ""; public array $kids = []; }
++$tree = apply (new Node()) {
++    $this->name = "root";
++    $this->kids[] = apply (new Node()) { $this->name = "child1"; };
++    $this->kids[] = apply (new Node()) { $this->name = "child2"; };
++};
++echo $tree->name, ":", implode(",", array_map(fn($n) => $n->name, $tree->kids)), "\n";
++
++// Parenthesised, the result can be dereferenced immediately.
++class Counter { public int $n = 0; public function get(): int { return $this->n; } }
++echo (apply (new Counter()) { $this->n = 42; })->get(), "\n";
++
++// `apply` remains usable as a method name (semi-reserved).
++class Svc { public function apply(string $s): string { return "svc:$s"; } }
++echo (new Svc())->apply("go"), "\n";
++?>
++--EXPECT--
++3,4,a|b
++db.local:5432
++root:child1,child2
++42
++svc:go
+diff --git a/Zend/tests/apply_comprehensive.phpt b/Zend/tests/apply_comprehensive.phpt
+new file mode 100644
+index 00000000..6cbceccc
+--- /dev/null
++++ b/Zend/tests/apply_comprehensive.phpt
+@@ -0,0 +1,57 @@
++--TEST--
++apply: capture semantics, method context, control flow, exceptions
++--FILE--
++<?php
++class Bag { public array $items = []; }
++
++// Control flow inside the block; captured variable drives it.
++$seed = ["a", "b", "c"];
++$bag = apply (new Bag()) {
++    foreach ($seed as $s) {
++        $this->items[] = strtoupper($s);
++    }
++};
++echo implode(",", $bag->items), "\n";                 // A,B,C
++
++// Capture is by value at the apply point.
++$n = 1;
++$captured = apply (new Bag()) { $this->items[] = $n; };
++$n = 999;
++echo $captured->items[0], "\n";                        // 1
++
++// Inside a method: the block's $this is the receiver, not the enclosing object.
++class Factory {
++    public string $prefix = "F-";
++    public function make(string $s): Bag {
++        $p = $this->prefix;                            // read enclosing $this first
++        return apply (new Bag()) { $this->items[] = $p . $s; };
++    }
++}
++echo (new Factory())->make("x")->items[0], "\n";       // F-x
++
++// Local variables inside the block do not leak or affect the result.
++$r = apply (new Bag()) {
++    $tmp = 10;
++    $this->items[] = $tmp * 2;
++};
++echo $r->items[0], "\n";                               // 20
++
++// Exceptions thrown in the block propagate.
++try {
++    apply (new Bag()) { throw new RuntimeException("boom"); };
++} catch (Throwable $e) {
++    echo "caught: ", $e->getMessage(), "\n";
++}
++
++// The receiver expression is evaluated exactly once.
++function makeBag(): Bag { echo "make "; return new Bag(); }
++$once = apply (makeBag()) { $this->items[] = 1; };
++echo count($once->items), "\n";                        // make 1
++?>
++--EXPECT--
++A,B,C
++1
++F-x
++20
++caught: boom
++make 1
+diff --git a/Zend/zend_ast.c b/Zend/zend_ast.c
+index 9cb3c7aa..87a579af 100644
+--- a/Zend/zend_ast.c
++++ b/Zend/zend_ast.c
+@@ -2520,6 +2520,11 @@ static ZEND_COLD void zend_ast_export_ex(smart_str *str, zend_ast *ast, int prio
+ 		case ZEND_AST_AND:                     BINARY_OP(" && ",  130, 130, 131);
+ 		case ZEND_AST_OR:                      BINARY_OP(" || ",  120, 120, 121);
+ 		case ZEND_AST_PIPE:                    BINARY_OP(" |> ",  183, 183, 184);
++		case ZEND_AST_APPLY:
++			smart_str_appends(str, "apply(");
++			zend_ast_export_ex(str, ast->child[0], 0, indent);
++			smart_str_appends(str, ") { ... }");
++			break;
+ 		case ZEND_AST_ARRAY_ELEM:
+ 			if (ast->child[1]) {
+ 				zend_ast_export_ex(str, ast->child[1], 80, indent);
+diff --git a/Zend/zend_ast.h b/Zend/zend_ast.h
+index fb48b187..34b6f941 100644
+--- a/Zend/zend_ast.h
++++ b/Zend/zend_ast.h
+@@ -154,6 +154,7 @@ enum _zend_ast_kind {
+ 	ZEND_AST_NAMED_ARG,
+ 	ZEND_AST_PARENT_PROPERTY_HOOK_CALL,
+ 	ZEND_AST_PIPE,
++	ZEND_AST_APPLY,
+ 
+ 	/* 3 child nodes */
+ 	ZEND_AST_METHOD_CALL = 3 << ZEND_AST_NUM_CHILDREN_SHIFT,
+diff --git a/Zend/zend_compile.c b/Zend/zend_compile.c
+index 8be1ee14..82388fe9 100644
+--- a/Zend/zend_compile.c
++++ b/Zend/zend_compile.c
+@@ -8480,7 +8480,9 @@ static zend_op_array *zend_compile_func_decl_ex(
+ 		lcname = zend_begin_method_decl(op_array, decl->name, has_body);
+ 	} else {
+ 		lcname = zend_begin_func_decl(result, op_array, decl, level);
+-		if (decl->kind == ZEND_AST_ARROW_FUNC) {
++		if (decl->kind == ZEND_AST_ARROW_FUNC
++		 || (decl->kind == ZEND_AST_CLOSURE && (ast->attr & ZEND_APPLY_RECEIVER_CLOSURE))) {
++			/* `apply` blocks import surrounding variables implicitly, like arrow fns. */
+ 			find_implicit_binds(&info, params_ast, stmt_ast);
+ 			compile_implicit_lexical_binds(&info, result, op_array);
+ 		} else if (uses_ast) {
+@@ -8551,7 +8553,8 @@ static zend_op_array *zend_compile_func_decl_ex(
+ 		zend_mark_function_as_generator();
+ 		zend_emit_op(NULL, ZEND_GENERATOR_CREATE, NULL, NULL);
+ 	}
+-	if (decl->kind == ZEND_AST_ARROW_FUNC) {
++	if (decl->kind == ZEND_AST_ARROW_FUNC
++	 || (decl->kind == ZEND_AST_CLOSURE && (ast->attr & ZEND_APPLY_RECEIVER_CLOSURE))) {
+ 		zend_compile_implicit_closure_uses(&info);
+ 		zend_hash_destroy(&info.uses);
+ 	} else if (uses_ast) {
+@@ -11799,6 +11802,50 @@ static void zend_compile_stmt(zend_ast *ast) /* {{{ */
+ }
+ /* }}} */
+ 
++/* --- `apply (EXPR) { STMTS }` (Kotlin-style receiver scope function) -------
++ * Runs STMTS with $this bound to EXPR — auto-capturing surrounding variables by
++ * value, like an arrow function — and evaluates to EXPR. It lowers to:
++ *
++ *     (function () { STMTS; return $this; })->call(EXPR)
++ *
++ * ->call() binds $this to the receiver and returns it, so the whole expression
++ * yields the receiver (Kotlin `apply`). Nested `apply` blocks rebind $this to
++ * their own receiver. The synthesised closure is marked ZEND_APPLY_RECEIVER_CLOSURE
++ * so the compiler imports free variables implicitly. */
++static void zend_compile_apply(znode *result, zend_ast *ast) /* {{{ */
++{
++	zend_ast *receiver = ast->child[0];
++	zend_ast *body = ast->child[1];
++
++	if (body == NULL) {
++		body = zend_ast_create_list(0, ZEND_AST_STMT_LIST);
++	}
++	/* Append `return $this;` so ->call() evaluates to the receiver. */
++	body = zend_ast_list_add(body, zend_ast_create(ZEND_AST_RETURN,
++		zend_ast_create(ZEND_AST_VAR,
++			zend_ast_create_zval_from_str(ZSTR_KNOWN(ZEND_STR_THIS)))));
++
++	/* function () { <body> } — flagged for implicit variable capture. */
++	zend_ast *closure = zend_ast_create_decl(ZEND_AST_CLOSURE, 0,
++		zend_ast_get_lineno(ast), NULL, NULL,
++		zend_ast_create_list(0, ZEND_AST_PARAM_LIST), NULL, body, NULL, NULL);
++	closure->attr = ZEND_APPLY_RECEIVER_CLOSURE;
++
++	/* (closure)->call(receiver) */
++	zend_ast *call = zend_ast_create(ZEND_AST_METHOD_CALL, closure,
++		zend_ast_create_zval_from_str(zend_string_init("call", sizeof("call") - 1, 0)),
++		zend_ast_create_list(1, ZEND_AST_ARG_LIST, receiver));
++
++	/* receiver and body are now owned by `call`; detach so destroying the apply
++	 * node does not double-free them. */
++	ast->child[0] = NULL;
++	ast->child[1] = NULL;
++
++	zend_compile_expr(result, call);
++	zend_ast_destroy(call);
++}
++/* }}} */
++
+ static void zend_compile_expr_inner(znode *result, zend_ast *ast) /* {{{ */
+ {
+ 	/* CG(zend_lineno) = ast->lineno; */
+@@ -11932,6 +11979,9 @@ static void zend_compile_expr_inner(znode *result, zend_ast *ast) /* {{{ */
+ 		case ZEND_AST_MATCH:
+ 			zend_compile_match(result, ast);
+ 			return;
++		case ZEND_AST_APPLY:
++			zend_compile_apply(result, ast);
++			return;
+ 		case ZEND_AST_PIPE:
+ 			zend_compile_pipe(result, ast);
+ 			return;
+diff --git a/Zend/zend_compile.h b/Zend/zend_compile.h
+index c07fa9bf..bbe5599a 100644
+--- a/Zend/zend_compile.h
++++ b/Zend/zend_compile.h
+@@ -1211,6 +1211,10 @@ static zend_always_inline bool zend_check_arg_send_type(const zend_function *zf,
+ /* Used to disallow pipes with arrow functions that lead to confusing parse trees. */
+ #define ZEND_PARENTHESIZED_ARROW_FUNC 1
+ 
++/* Marks the synthesised closure of an `apply (EXPR) { ... }` block, so the
++ * compiler imports free variables implicitly (like an arrow function). */
++#define ZEND_APPLY_RECEIVER_CLOSURE 2
++
+ /* For "use" AST nodes and the seen symbol table */
+ #define ZEND_SYMBOL_CLASS    (1<<0)
+ #define ZEND_SYMBOL_FUNCTION (1<<1)
+diff --git a/Zend/zend_language_parser.y b/Zend/zend_language_parser.y
+index e4d61006..51bc1351 100644
+--- a/Zend/zend_language_parser.y
++++ b/Zend/zend_language_parser.y
+@@ -116,6 +116,7 @@ static YYSIZE_T zend_yytnamerr(char*, const char*);
+ %token <ident> T_CLONE         "'clone'"
+ %token <ident> T_EXIT          "'exit'"
+ %token <ident> T_IF            "'if'"
++%token <ident> T_APPLY         "'apply'"
+ %token <ident> T_ELSEIF        "'elseif'"
+ %token <ident> T_ELSE          "'else'"
+ %token <ident> T_ENDIF         "'endif'"
+@@ -306,7 +307,7 @@ start:
+ 
+ reserved_non_modifiers:
+ 	  T_INCLUDE | T_INCLUDE_ONCE | T_EVAL | T_REQUIRE | T_REQUIRE_ONCE | T_LOGICAL_OR | T_LOGICAL_XOR | T_LOGICAL_AND
+-	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
++	| T_INSTANCEOF | T_NEW | T_CLONE | T_EXIT | T_IF | T_APPLY | T_ELSEIF | T_ELSE | T_ENDIF | T_ECHO | T_DO | T_WHILE | T_ENDWHILE
+ 	| T_FOR | T_ENDFOR | T_FOREACH | T_ENDFOREACH | T_DECLARE | T_ENDDECLARE | T_AS | T_TRY | T_CATCH | T_FINALLY
+ 	| T_THROW | T_USE | T_INSTEADOF | T_GLOBAL | T_VAR | T_UNSET | T_ISSET | T_EMPTY | T_CONTINUE | T_GOTO
+ 	| T_FUNCTION | T_CONST | T_RETURN | T_PRINT | T_YIELD | T_LIST | T_SWITCH | T_ENDSWITCH | T_CASE | T_DEFAULT | T_BREAK
+@@ -1386,6 +1387,8 @@ expr:
+ 	|	attributes T_STATIC inline_function
+ 			{ $$ = zend_ast_with_attributes($3, $1); ((zend_ast_decl *) $$)->flags |= ZEND_ACC_STATIC; }
+ 	|	match { $$ = $1; }
++	|	T_APPLY '(' expr ')' '{' inner_statement_list '}'
++			{ $$ = zend_ast_create(ZEND_AST_APPLY, $3, $6); }
+ ;
+ 
+ 
+diff --git a/Zend/zend_language_scanner.l b/Zend/zend_language_scanner.l
+index 3ecb2f8d..92c83973 100644
+--- a/Zend/zend_language_scanner.l
++++ b/Zend/zend_language_scanner.l
+@@ -1454,6 +1454,10 @@ OPTIONAL_WHITESPACE_OR_COMMENTS ({WHITESPACE}|{MULTI_LINE_COMMENT}|{SINGLE_LINE_
+ 	RETURN_TOKEN_WITH_IDENT(T_IF);
+ }
+ 
++<ST_IN_SCRIPTING>"apply" {
++	RETURN_TOKEN_WITH_IDENT(T_APPLY);
++}
++
+ <ST_IN_SCRIPTING>"elseif" {
+ 	RETURN_TOKEN_WITH_IDENT(T_ELSEIF);
+ }

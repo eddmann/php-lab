@@ -293,4 +293,21 @@ echo $scaled, "\\n";           // 50
 lazy $unused = (function () { echo "never runs\\n"; return 0; })();
 echo "done\\n";
 `,
+  '21-apply': `<?php
+class Server { public string $host = ""; public int $port = 0; public array $routes = []; }
+class Route  { public string $path = ""; }
+
+$host = "0.0.0.0";
+$server = apply (new Server()) {
+    $this->host = $host;                       // captured from the surrounding scope
+    $this->port = 8080;
+    $this->routes[] = apply (new Route()) {    // nested: this is now the Route
+        $this->path = "/health";
+    };
+    $this->routes[] = apply (new Route()) { $this->path = "/metrics"; };
+};
+
+printf("%s:%d\\n", $server->host, $server->port);
+echo implode(", ", array_map(fn($r) => $r->path, $server->routes)), "\\n";
+`,
 };

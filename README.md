@@ -36,6 +36,7 @@ Raku, D, Nim, Groovy, Swift, Haskell, and ALGOL 60:
 | 18 | Lazy (by-name) parameters — `lazy $msg` | ALGOL 60/Scala | [18-lazy-params](features/18-lazy-params/) |
 | 19 | Infix function calls — `$a max $b` | Haskell/Kotlin | [19-infix](features/19-infix/) |
 | 20 | `lazy` locals (`lazy val`) — computed on first read, memoised | Scala | [20-lazy-val](features/20-lazy-val/) |
+| 21 | `apply` builder blocks — lambda-with-receiver | Kotlin | [21-apply](features/21-apply/) |
 
 Each folder holds `feature.patch`, a `README.md` writeup, an `RFC.md` proposal, a
 `tests/` suite, and `smoke.sh`.
