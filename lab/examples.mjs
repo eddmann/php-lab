@@ -277,4 +277,20 @@ function clamp(int $x, array $range): int {
 }
 echo 150 clamp [0, 100], "\\n";            // 100
 `,
+  '20-lazy-val': `<?php
+function connect() { echo "connecting...\\n"; return new ArrayObject(["ready" => true]); }
+
+lazy $db = connect();          // not run yet
+echo "app started\\n";
+echo $db["ready"] ? "query 1\\n" : "";   // connects here, on first read
+echo $db["ready"] ? "query 2\\n" : "";   // same handle — no reconnect
+
+$factor = 10;
+lazy $scaled = $factor * 5;    // captures $factor = 10 at declaration
+$factor = 999;
+echo $scaled, "\\n";           // 50
+
+lazy $unused = (function () { echo "never runs\\n"; return 0; })();
+echo "done\\n";
+`,
 };
