@@ -310,4 +310,38 @@ $server = apply (new Server()) {
 printf("%s:%d\\n", $server->host, $server->port);
 echo implode(", ", array_map(fn($r) => $r->path, $server->routes)), "\\n";
 `,
+  '22-native-markup': `<?php
+// A bare < in operand position begins a markup expression — JSX-style syntax
+// that evaluates to an Html\\Htmlable object and renders escape-by-default HTML.
+
+$user = "Ada & <friends>";
+
+// Elements, nesting, and interpolation. Dynamic values are escaped.
+echo <div class="greeting">Hello {$user}, <em>welcome</em> back</div>, "\\n";
+
+// A component: a capitalised tag dispatches to render_component(), props map
+// to the constructor's named arguments, and the body becomes its slot.
+class Card implements Html\\Htmlable {
+    public function __construct(
+        public string $title,
+        #[Html\\Slot] public ?Html\\Htmlable $body = null,
+    ) {}
+    public function toHtml(): Html\\Htmlable {
+        return <section class="card">
+            <h2>{$this->title}</h2>
+            {$this->body}
+        </section>;
+    }
+}
+
+// Fragments (<>...</>) group children with no wrapper; arrays flatten.
+$tags = ["php", "html", "jsx"];
+echo <Card title="Native Markup">
+    <p>Markup is a first-class value: return it, compose it, pass it around.</p>
+    <ul>{array_map(fn($t) => <li>#{$t}</li>, $tags)}</ul>
+</Card>, "\\n";
+
+// Html\\raw() is the greppable opt-out for trusted HTML strings.
+echo <p>{Html\\raw("<strong>already safe</strong>")}</p>, "\\n";
+`,
 };

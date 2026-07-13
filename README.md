@@ -37,6 +37,7 @@ Raku, D, Nim, Groovy, Swift, Haskell, and ALGOL 60:
 | 19 | Infix function calls — `$a max $b` | Haskell/Kotlin | [19-infix](features/19-infix/) |
 | 20 | `lazy` locals (`lazy val`) — computed on first read, memoised | Scala | [20-lazy-val](features/20-lazy-val/) |
 | 21 | `apply` builder blocks — lambda-with-receiver | Kotlin | [21-apply](features/21-apply/) |
+| 22 | Native markup expressions — JSX-style `<div>{$x}</div>` HTML values | JSX/XHP | [22-native-markup](features/22-native-markup/) |
 
 Each folder holds `feature.patch`, a `README.md` writeup, an `RFC.md` proposal, a
 `tests/` suite, and `smoke.sh`.
